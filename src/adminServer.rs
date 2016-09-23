@@ -1,5 +1,5 @@
-use std::error::Error;
 
+/*
 use std::thread;
 use std::sync::{Mutex,RwLock,Arc,Barrier,Weak};
 
@@ -195,7 +195,12 @@ impl AdminServer{
         match commandType {
             //"answer" => *answer.lock().unwrap()=Some(String::from(v[1])),
             //"print" => appData.log.print( String::from(args) ),
-            "cmd" => {},
+            "cmd" => {
+                match args{
+                    "stop" => *appData.shouldStop.write().unwrap()=true,
+                    _=>{},
+                }
+            },
             _=>appData.log.print( format!("[ERROR]ToGS: unknown command\"{}\"", args) ),
         }
     }
@@ -241,7 +246,7 @@ impl AdminServer{
         appData.log.print(format!("[INFO]Game server has been stoped"));
     }
 }
-
+*/
 
 
 /*

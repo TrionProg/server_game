@@ -1,0 +1,5 @@
+[LOG]
+[INFO]Server configurations are loaded
+[INFO] Initializing Storage
+[INFO] Storage has been initialized successfully
+[INFO]Server has been started

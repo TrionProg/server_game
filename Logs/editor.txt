@@ -1,5 +1,11 @@
 [LOG]
-[INFO]Server configurations are loaded
+[INFO] Server configurations are loaded
 [INFO] Initializing Storage
 [INFO] Storage has been initialized successfully
-[INFO]Server has been started
+[INFO] Starting TCP and UDP servers
+[INFO] TCP server is ready
+[INFO] Server has been started
+[INFO] Stoping the server
+[INFO] TCP server has been stoped
+[INFO] Destroying storage
+[INFO] Storage has been destroyed

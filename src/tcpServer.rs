@@ -10,11 +10,17 @@ use mio::tcp::*;
 use slab::Slab;
 use std::net::SocketAddr;
 
+use time::{get_time};
+use std::time::Duration;
+
 use appData::AppData;
-use server::Server;
+use server::{Server,DisconnectionReason,DisconnectionSource};
 use server::ServerState;
 
 use tcpConnection::TCPConnection;
+
+const  ACTIVITY_CONNECTION_LOST_DELAY: i64 = 10;
+const  ACTIVITY_DISCONNECT_DELAY: i64 = 2;
 
 pub struct TCPServer{
     pub appData:Arc<AppData>,
@@ -48,10 +54,13 @@ impl TCPServer{
 
         }
 
+        self.appData.log.print(format!("[INFO] TCP server is ready"));
+
         let mut reregisterList=Vec::with_capacity(self.appData.serverConfig.server_connectionsLimit);
 
         while {*self.server.state.read().unwrap()}==ServerState::Processing {
-            let eventsNumber=try!(self.poll.poll(&mut self.events, None).or(Err(String::from("Can not get eventsNumber")) ) );
+            let eventsNumber=try!(self.poll.poll(&mut self.events, Some(Duration::new(0,100_000_000)) ).or(Err(String::from("Can not get eventsNumber")) ) );
+            //периодически выходить по таймауту
 
             for i in 0..eventsNumber {
                 let event = try!(self.events.get(i).ok_or(String::from("Can not get event") ) );
@@ -64,9 +73,7 @@ impl TCPServer{
             self.processTick();
         }
 
-        //уничтожаем все
-
-        Ok(())
+        self.onServerShutdown()
     }
 
     fn reregisterConnections(&mut self, reregisterList:&mut Vec<Token>){
@@ -76,7 +83,7 @@ impl TCPServer{
             let connection=& (*connectionsGuard)[*connectionToken];
 
             if connection.isActive() {
-                connection.reregister(&mut self.poll).unwrap_or_else(|e| { connection.onError(); });
+                connection.reregister(&mut self.poll).unwrap_or_else(|e| { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e)); });
             }
         }
 
@@ -89,11 +96,11 @@ impl TCPServer{
         if self.checkerCounter==10 {
             self.checkerCounter=0;
 
-            self.clear();
+            self.checkConnections();
         }
     }
 
-    fn clear(&mut self){
+    fn checkConnections(&mut self){
         let mut removeConnections = Vec::new();
 
         //create list of connections we need to remove
@@ -101,12 +108,24 @@ impl TCPServer{
             let tcpConnectionsGuard=self.server.tcpConnections.read().unwrap();
 
             for connection in (*tcpConnectionsGuard).iter() {
-                if connection.shouldReset() {
-                    removeConnections.push(connection.token);
+                let removeConnection=if connection.shouldReset() {
+                    true
+                /*
                 }else{
-                    //check activity
-                    //deregister
-                    //check, and (unregister and removeConnections.push(connection.token));
+                    //match connection.
+                     if !connection.isActive() && (*connection.activityTime.lock().unwrap()).sec+ACTIVITY_DISCONNECT_DELAY < get_time().sec {
+                    true
+                }else if (*connection.activityTime.lock().unwrap()).sec+ACTIVITY_CONNECTION_LOST_DELAY < get_time().sec {
+                    connection.disconnect(DisconnectionReason::ConnectionLost( DisconnectionSource::TCP ) );
+                    true
+                */
+                }else{
+                    false
+                };
+
+                if removeConnection {
+                    removeConnections.push(connection.token);
+                    connection.deregister(&mut self.poll);
                 }
             }
         }
@@ -124,7 +143,7 @@ impl TCPServer{
         //Error with connection has been occured
         if event.is_error() {
             println!("error!!");
-            self.server.getTCPConnectionAnd(token, |connection| { connection.onError(); });
+            self.server.getTCPConnectionAnd(token, |connection| { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, "socket error") ); });
 
             return;
         }
@@ -132,7 +151,7 @@ impl TCPServer{
         //Connection has been closed
         if event.is_hup() {
             println!("hup!!");
-            self.server.getTCPConnectionAnd(token, |connection| { connection.onError(); });
+            self.server.getTCPConnectionAnd(token, |connection| { connection.disconnect(DisconnectionReason::Hup(DisconnectionSource::TCP)); });
 
             return;
         }
@@ -142,7 +161,7 @@ impl TCPServer{
             println!("write!!");
             self.server.getTCPConnectionAnd(token, |connection| {
                 if !connection.shouldReset() { //isActive пропускается, чтобы отправить прощальное сообщение
-                    connection.writeMessages().unwrap_or_else(|e| { connection.onError(); });
+                    connection.writeMessages().unwrap_or_else(|e| { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e) ); });
                 }
             });
         }
@@ -158,9 +177,8 @@ impl TCPServer{
                     if connection.isActive() {
                         match connection.readMessage(buffer){
                             Ok ( playerID ) => Ok(playerID),
-                            Err( e ) => { connection.onError(); Err(()) },//.unwrap_or_else(|e| { connection.onError(); /*return*/});
+                            Err( e ) => { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e) ); Err(()) },//.unwrap_or_else(|e| { connection.onError(); /*return*/});
                         }
-                        //proccess self.buffer and Ok(Some(length))
                     }else{
                         Err(())
                     }
@@ -184,8 +202,6 @@ impl TCPServer{
 
     fn processAccept(&mut self) {
         loop {
-            // Log an error if there is no socket, but otherwise move on so we do not tear down the
-            // entire server.
             let socket = match self.listener.accept() {
                 Ok((socket, _)) => socket,
                 Err(e) => {
@@ -229,5 +245,64 @@ impl TCPServer{
         ).or_else(|e| {
             Err(e)
         })
+    }
+
+    fn processEventOnServerShutdown(&mut self, token: Token, event: Ready) {
+        if event.is_writable() {
+            println!("write!!");
+            self.server.getTCPConnectionAnd(token, |connection| {
+                if !connection.shouldReset() { //isActive пропускается, чтобы отправить прощальное сообщение
+                    connection.writeMessages().unwrap_or_else(|e| { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e) ); });
+                }
+            });
+        }
+    }
+
+    fn onServerShutdown(&mut self) -> Result<(),String> {
+        //Disconnect by reason ServerShutdown
+        {
+            let mut tcpConnectionsGuard=self.server.tcpConnections.write().unwrap();
+
+            for connection in (*tcpConnectionsGuard).iter() {
+                if connection.isActive() {
+                    connection.disconnect(DisconnectionReason::ServerShutdown);
+                }
+            }
+
+            (*tcpConnectionsGuard).clear();
+        }
+
+        let waitTimeBegin=get_time();
+
+        while waitTimeBegin.sec + ACTIVITY_DISCONNECT_DELAY > get_time().sec {
+            let eventsNumber=try!(self.poll.poll(&mut self.events, Some(Duration::new(0,100_000_000)) ).or(Err(String::from("Can not get eventsNumber")) ) );
+            //периодически выходить по таймауту
+
+            for i in 0..eventsNumber {
+                let event = try!(self.events.get(i).ok_or(String::from("Can not get event") ) );
+
+                self.processEventOnServerShutdown(event.token(), event.kind());
+            }
+        }
+
+        {
+            let mut tcpConnectionsGuard=self.server.tcpConnections.write().unwrap();
+
+            for connection in (*tcpConnectionsGuard).iter() {
+                connection.deregister(&mut self.poll);
+            }
+
+            (*tcpConnectionsGuard).clear();
+        }
+
+        self.deregister();
+
+        Ok(())
+    }
+
+    fn deregister(&mut self) {
+        self.poll.deregister(
+            &self.listener,
+        );
     }
 }

@@ -15,9 +15,25 @@ use std::collections::VecDeque;
 
 use time::Timespec;
 use time::get_time;
+//use std::time::Duration;
 
-use server::Server;
+use server::{Server,DisconnectionReason,DisconnectionSource};
 use tcpServer::TCPServer;
+
+/*
+причины disconnect:
+Error (detected by TCP)
+    помечаем shouldReset и, если есть игрок, уничтожаем UDP connection, отправляя сообщение
+Error (detected by UDP)
+    помечаем isActive=false, отправляем сообщение
+ConnectionLost(detected by TCP)
+    помечаем shouldReset и, если есть игрок, уничтожаем UDP connection, не отправляя сообщение
+ConnectionLost(detected by UDP)
+    помечаем shouldReset, не отправляем сообщение
+Kick
+    помечаем isActive=false, отправляем сообщение
+*/
+
 
 
 pub struct TCPConnection{
@@ -32,7 +48,7 @@ pub struct TCPConnection{
     sendQueue: Mutex< VecDeque<Vec<u8>> >,
     readContinuation:Mutex<Option<u32>>,
 
-    pub activityTime:Mutex<Timespec>,
+    pub timeoutBegin:Mutex<Option<Timespec>>, //вообще для тцп он не нужен(не нужно подтверждать соединение), только для прощального пакета
 }
 
 
@@ -50,11 +66,11 @@ impl TCPConnection{
             sendQueue: Mutex::new( VecDeque::with_capacity(32) ),
             readContinuation: Mutex::new(None),
 
-            activityTime: Mutex::new( get_time() ),
+            timeoutBegin: Mutex::new( None ),
         }
     }
 
-    pub fn readMessage(&self, buffer:&mut Vec<u8>) -> io::Result<Option<u16>> {
+    pub fn readMessage(&self, buffer:&mut Vec<u8>) -> Result<Option<u16>, &'static str> {
         let messageLength = match try!(self.readMessageLength()) {
             Some(ml) => ml,
             None => { return Ok(None); },
@@ -65,7 +81,7 @@ impl TCPConnection{
         }
 
         if messageLength > 16*1024 {
-            return Err(Error::new(ErrorKind::InvalidData, "Too much length of message"));
+            return Err("Too much length of message max is 16 kbytes");
         }
 
         unsafe { buffer.set_len(messageLength as usize); }
@@ -76,13 +92,10 @@ impl TCPConnection{
         match sockRef.take(messageLength as u64).read(buffer) {
             Ok(n) => {
                 if n < messageLength as usize {
-                    return Err(Error::new(ErrorKind::InvalidData, "Did not read enough bytes"));
+                    return Err("Did not read enough bytes");
                 }
 
                 *self.readContinuation.lock().unwrap() = None;
-
-                *self.activityTime.lock().unwrap()=get_time();
-                //update activityTime
 
                 Ok(*self.playerID.read().unwrap())
             },
@@ -92,14 +105,14 @@ impl TCPConnection{
                     *self.readContinuation.lock().unwrap() = Some(messageLength);
                     Ok(None)
                 } else {
-                    Err(e)
+                    Err("read message error")
                 }
             }
         }
     }
 
 
-    fn readMessageLength(&self) -> io::Result<Option<u32>> {
+    fn readMessageLength(&self) -> Result<Option<u32>, &'static str> {
         {
             let readContinuationGuard=self.readContinuation.lock().unwrap();
 
@@ -119,20 +132,20 @@ impl TCPConnection{
                 if e.kind() == ErrorKind::WouldBlock {
                     return Ok(None);
                 } else {
-                    return Err(e);
+                    return Err("Read message length error");
                 }
             }
         };
 
         if bytes!=4 {
-            return Err(Error::new(ErrorKind::InvalidData, "Invalid message length"));
+            return Err("Invalid message length");
         }
 
         let messageLength = BigEndian::read_u32(buf.as_ref());
         Ok(Some(messageLength))
     }
 
-    pub fn writeMessages(&self) -> io::Result<()> {
+    pub fn writeMessages(&self) -> Result<(), &'static str> {
         let mut sendQueueGuard=self.sendQueue.lock().unwrap();
         let mut socketGuard=self.socket.lock().unwrap();
 
@@ -148,7 +161,7 @@ impl TCPConnection{
 
                         break;
                     } else {
-                        return Err(e)
+                        return Err("write message error")
                     }
                 }
             }
@@ -171,14 +184,7 @@ impl TCPConnection{
         }
     }
 
-    pub fn disconnect(&self){
-        *self.isActive.write().unwrap() = false;
-
-        //sendMessage
-    }
-
-
-    pub fn register(&self, poll: &mut Poll) -> io::Result<()> {
+    pub fn register(&self, poll: &mut Poll) -> Result<(), &'static str> {
         self.interest.lock().unwrap().insert(Ready::readable());
 
         poll.register(
@@ -187,52 +193,126 @@ impl TCPConnection{
             *self.interest.lock().unwrap(),
             PollOpt::edge() | PollOpt::oneshot()
         ).or_else(|e|
-            Err(e)
+            Err("Can not register connection")
         )
     }
 
     /// Re-register interest in read events with poll.
-    pub fn reregister(&self, poll: &mut Poll) -> io::Result<()> {
+    pub fn reregister(&self, poll: &mut Poll) -> Result<(), &'static str> {
         poll.reregister(
             &(*self.socket.lock().unwrap()),
             self.token,
             *self.interest.lock().unwrap(),
             PollOpt::edge() | PollOpt::oneshot()
         ).or_else(|e|
-            Err(e)
+            Err("Can not reregister connection")
         )
+    }
+
+    pub fn isActive(&self) -> bool{
+        *self.isActive.read().unwrap()
     }
 
     pub fn shouldReset(&self) -> bool {
         *self.shouldReset.lock().unwrap()
     }
 
-    pub fn onError(&self) {
-        *self.shouldReset.lock().unwrap()=true;
-        *self.isActive.write().unwrap()=false;
+    /*
+    причины disconnect:
+    Error (detected by TCP)
+        помечаем shouldReset и, если есть игрок, уничтожаем UDP connection, отправляя сообщение
+    Error (detected by UDP)
+        помечаем isActive=false, отправляем сообщение
+    ConnectionLost(detected by TCP)
+        помечаем shouldReset и, если есть игрок, уничтожаем UDP connection, не отправляя сообщение
+    ConnectionLost(detected by UDP)
+        помечаем shouldReset, не отправляем сообщение
+    Kick
+        помечаем isActive=false, отправляем сообщение
+    Other
 
+    */
+
+    pub fn disconnect(&self, reason:DisconnectionReason){
+        println!("disconnect");
         let mut playerGuard=self.playerID.write().unwrap();
 
-        match *playerGuard {
-            Some( playerID ) => {
-                let playersGuard=self.server.players.read().unwrap();
+        match reason{
+            DisconnectionReason::Error( ref source, ref msg ) => {
+                match *source{
+                    DisconnectionSource::TCP => {
+                        *self.shouldReset.lock().unwrap()=true;
 
-                //(*playersGuard)[playerID].onTCPError();
+                        match *playerGuard {
+                            Some( playerID ) =>
+                                self.server.getPlayerAnd(playerID, | player | player.disconnect(reason.clone())),
+                            None => {},
+                        }
+                    },
+                    DisconnectionSource::UDP | DisconnectionSource::Player=> {
+                        //sendMessage
+                    },
+                }
             },
-            None => {},
+            DisconnectionReason::ConnectionLost( ref source ) => {
+                *self.shouldReset.lock().unwrap()=true;
+                match *source{
+                    DisconnectionSource::TCP => {
+                        match *playerGuard {
+                            Some( playerID ) =>
+                                self.server.getPlayerAnd(playerID, | player | player.disconnect(reason.clone())),
+                            None => {},
+                        }
+                    },
+                    DisconnectionSource::UDP | DisconnectionSource::Player=> {},
+                }
+            },
+            DisconnectionReason::Kick( ref source, ref message ) => {//только от игрока??
+                match *source{
+                    DisconnectionSource::TCP => {
+                        match *playerGuard {
+                            Some( playerID ) =>
+                                self.server.getPlayerAnd(playerID, | player | player.disconnect(reason.clone())),
+                            None => {},
+                        }
+                    },
+                    DisconnectionSource::UDP | DisconnectionSource::Player=> {},
+                }
+
+                //send message
+            },
+            DisconnectionReason::ServerShutdown => {
+                match *playerGuard {
+                    Some( playerID ) =>
+                        self.server.getPlayerAnd(playerID, | player | player.disconnect(reason.clone())),
+                    None => {},
+                }
+
+                //send message
+            },
+            DisconnectionReason::Hup( ref source ) => {
+                *self.shouldReset.lock().unwrap()=true;
+
+                match *source{
+                    DisconnectionSource::TCP => {
+                        match *playerGuard {
+                            Some( playerID ) =>
+                                self.server.getPlayerAnd(playerID, | player | player.disconnect(reason.clone())),
+                            None => {},
+                        }
+                    },
+                    DisconnectionSource::UDP | DisconnectionSource::Player=> {},
+                }
+            },
         }
 
+        *self.isActive.write().unwrap()=false;
         *playerGuard=None;
     }
 
-    pub fn disconnect_with(&self, msg:&str){
-        *self.isActive.write().unwrap()=false;
-        *self.playerID.write().unwrap()=None;
-
-        //sendMessage
-    }
-
-    pub fn isActive(&self) -> bool{
-        *self.isActive.read().unwrap()
+    pub fn deregister(&self, poll: &mut Poll) {
+        poll.deregister(
+            &(*self.socket.lock().unwrap())
+        );
     }
 }

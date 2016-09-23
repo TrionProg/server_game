@@ -65,6 +65,22 @@ pub enum ServerState{
     Error,
 }
 
+#[derive(PartialEq, Eq, Clone)]
+pub enum DisconnectionReason{
+    Error (DisconnectionSource, &'static str),
+    ConnectionLost(DisconnectionSource),
+    Kick ( DisconnectionSource, String),
+    ServerShutdown,
+    Hup ( DisconnectionSource ),
+}
+
+#[derive(PartialEq, Eq, Clone)]
+pub enum DisconnectionSource{
+    TCP,
+    UDP,
+    Player,
+}
+
 pub struct Server{
     pub appData:Weak<AppData>,
     pub state:RwLock<ServerState>,
@@ -74,11 +90,13 @@ pub struct Server{
 
     pub tcpConnections: RwLock<Slab< TCPConnection , Token>>,
     //udpConnections: RwLock<Slab< UDPConnection , u32>>,
-    pub players: RwLock<Slab< Player , u16>>,
+    pub players: RwLock<Slab< Player , usize>>,
 }
 
 impl Server{
     pub fn start( appData:Arc<AppData> ) -> Result<(), String> {
+        appData.log.print(format!("[INFO] Starting TCP and UDP servers"));
+
         let serverAddress=if appData.isEditor {
             format!("{}:{}", appData.serverConfig.server_address, appData.serverConfig.server_editorPort)
         }else{
@@ -120,9 +138,9 @@ impl Server{
 
         let tcpServerJoinHandle=thread::spawn(move||{
             match tcpServer.process(){
-                Ok ( _ ) => {},
+                Ok ( _ ) => { tcpServer.appData.log.print(format!("[INFO] TCP server has been stoped")); },
                 Err( e ) => {
-                    tcpServer.appData.log.print( format!("[ERROR] Server: {}", e) );
+                    tcpServer.appData.log.print( format!("[ERROR] TCP Server: {}", e) );
 
                     *tcpServer.server.tcpServerJoinHandle.lock().unwrap()=None; //чтобы не было join самого себя
                     Server::stop(tcpServer.server);
@@ -158,12 +176,14 @@ impl Server{
         //а теперь добавляем данный модуль
         *appData.server.write().unwrap()=Some(server);
 
-        println!("initialized");
-
         Ok(())
     }
 
     pub fn stop( server:Arc<Server> ){
+        if {*server.state.read().unwrap()}==ServerState::Processing {
+            server.appData.upgrade().unwrap().log.print( String::from("[INFO] Stoping the server") );
+        }
+
         *server.state.write().unwrap()=ServerState::Stop;
 
         let appData=server.appData.upgrade().unwrap();
@@ -198,5 +218,11 @@ impl Server{
         f(&mut (*udpConnectionsGuard)[token])
     }
     */
+
+    pub fn getPlayerAnd<T,F>(&self, playerID:u16, f:F) -> T where F:FnOnce(&Player) -> T {
+        let playersGuard=self.players.read().unwrap();
+
+        f(& (*playersGuard)[playerID as usize])
+    }
 
 }

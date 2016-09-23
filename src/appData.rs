@@ -43,6 +43,15 @@ impl AppData{
     }
 
     pub fn destroy( appData:Arc<AppData> ) {
+        //==================Stop the server==================
+        let server=(*appData.server.read().unwrap()).clone();
+
+        match server{
+            Some ( s ) => Server::stop(s),
+            None=>{},
+        }
+
+        //==================Destroy storage==================
         let storage=(*appData.storage.read().unwrap()).clone();
 
         match storage{

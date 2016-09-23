@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 /*
 extern crate nanomsg;
 use std::io::Read;
@@ -113,7 +115,7 @@ fn main() {
     let isEditor=match isEditorOrUndefined {
         Some( v ) => v,
         None => {
-            println!("Do not launch server_game directly! Use server_admin for it!");
+            println!("[ERROR] Do not launch server_game directly! Use server_admin for it!");
             return;
         }
     };
@@ -122,7 +124,7 @@ fn main() {
     let log=match Log::new(isEditor){
         Ok( l ) => l,
         Err( msg )=>{
-            println!( "[ERROR]Can not create log: {}", msg);
+            println!( "[ERROR] Can not create log: {}", msg);
             return;
         },
     };
@@ -131,11 +133,11 @@ fn main() {
 
     let serverConfig=match ServerConfig::read(){
         Ok( sc )=>{
-            log.print(format!("[INFO]Server configurations are loaded"));
+            log.print(format!("[INFO] Server configurations are loaded"));
             sc
         },
         Err( msg )=>{
-            log.print(format!("[ERROR]Can not read server configurations: {}", msg));
+            log.print(format!("[ERROR] Can not read server configurations: {}", msg));
             return;
         },
     };
@@ -156,16 +158,16 @@ fn main() {
     //===================Server========================
 
     match Server::start( appData.clone() ) {
-        Ok ( _ ) => appData.log.print(String::from("[INFO]Server has been started")),
+        Ok ( _ ) => appData.log.print(String::from("[INFO] Server has been started")),
         Err( e ) => {
-            appData.log.print(format!("[ERROR]Can not start server:{}",e));
+            appData.log.print(format!("[ERROR] Can not start server:{}",e));
             //remove storage?
             return;
         }
     }
 
 
-    thread::sleep_ms(50000);
+    thread::sleep_ms(5000);
 
     AppData::destroy( appData );
 

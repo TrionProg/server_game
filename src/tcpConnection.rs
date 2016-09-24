@@ -55,10 +55,10 @@ pub struct TCPConnection{
     server: Arc<Server>,
     shouldReset: Mutex<bool>,
     isActive:RwLock<bool>,
+    shouldReregister:Mutex<bool>,
     playerID:RwLock<Option<u16>>,
 
     socket: Mutex<TcpStream>,
-    interest: Mutex< Ready >,
     sendQueue: Mutex< VecDeque<Vec<u8>> >,
     readContinuation:Mutex<Option<u32>>,
 
@@ -74,10 +74,10 @@ impl TCPConnection{
             server: server,
             shouldReset: Mutex::new(false),
             isActive:RwLock::new(true),
+            shouldReregister:Mutex::new(false),
             playerID:RwLock::new(None),
 
             socket: Mutex::new(socket),
-            interest: Mutex::new( Ready::hup() ),
             sendQueue: Mutex::new( VecDeque::with_capacity(32) ),
             readContinuation: Mutex::new(None),
 
@@ -86,6 +86,8 @@ impl TCPConnection{
     }
 
     pub fn readMessage(&self, buffer:&mut Vec<u8>) -> Result<Option<u16>, &'static str> {
+        *self.shouldReregister.lock().unwrap()=true;
+
         let messageLength = match try!(self.readMessageLength()) {
             Some(ml) => ml,
             None => { return Ok(None); },
@@ -161,6 +163,8 @@ impl TCPConnection{
     }
 
     pub fn writeMessages(&self) -> Result<(), &'static str> {
+        *self.shouldReregister.lock().unwrap()=true;
+
         let mut sendQueueGuard=self.sendQueue.lock().unwrap();
         let mut socketGuard=self.socket.lock().unwrap();
 
@@ -182,11 +186,6 @@ impl TCPConnection{
             }
         }
 
-        if sendQueueGuard.len()==0 {
-            println!("writen");
-            self.interest.lock().unwrap().remove(Ready::writable());
-        }
-
         Ok(())
     }
 
@@ -195,22 +194,16 @@ impl TCPConnection{
 
         self.sendQueue.lock().unwrap().push_front(msg);
 
-        let mut interestGuard=self.interest.lock().unwrap();
-
-        if !(*interestGuard).is_writable() {
-            (*interestGuard).insert(Ready::writable());
-        }
-
-        //(*self.server.reregisterTCPConnections.lock().unwrap()).push(self.token);
+        *self.shouldReregister.lock().unwrap()=true;
     }
 
     pub fn register(&self, poll: &mut Poll) -> Result<(), &'static str> {
-        self.interest.lock().unwrap().insert(Ready::readable());
+        let interest=Ready::hup() | Ready::error() | Ready::readable();
 
         poll.register(
             &(*self.socket.lock().unwrap()),
             self.token,
-            *self.interest.lock().unwrap(),
+            interest,
             PollOpt::edge() | PollOpt::oneshot()
         ).or_else(|e|
             Err("Can not register connection")
@@ -219,10 +212,26 @@ impl TCPConnection{
 
     /// Re-register interest in read events with poll.
     pub fn reregister(&self, poll: &mut Poll) -> Result<(), &'static str> {
+        if !{*self.shouldReregister.lock().unwrap()} {
+            return Ok(());
+        }
+
+        *self.shouldReregister.lock().unwrap()=false;
+
+        let mut interest=Ready::hup() | Ready::error();
+
+        if self.isActive() {
+            interest.insert(Ready::readable());
+        }
+
+        if (*self.sendQueue.lock().unwrap()).len()>0 {
+            interest.insert(Ready::writable());
+        }
+
         poll.reregister(
             &(*self.socket.lock().unwrap()),
             self.token,
-            *self.interest.lock().unwrap(),
+            interest,
             PollOpt::edge() | PollOpt::oneshot()
         ).or_else(|e|
             Err("Can not reregister connection")

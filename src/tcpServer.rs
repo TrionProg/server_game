@@ -34,13 +34,6 @@ pub struct TCPServer{
     pub buffer: Vec<u8>,
 }
 
-/*
-А нужно ли ререгистрировать неактивные соединения(writeable) ? да, но другим методом:
-вообще после sendMessage и добавления интереса надо перерегистрировать, но это заставляет юзать poll, его можно либо положить с сервером(смысла нет тк он залочен)
-либо сделать список в сервере,коого надо перергистрировать, а потом прибавть к event-ным. так и сделаю
-после НЕ последней обработки так же надо перерегистрировать
-*/
-
 impl TCPServer{
     pub fn process(&mut self) -> Result<(),String>{
         try!(self.register().or(Err(String::from("Can not register server poll")) ) );
@@ -63,27 +56,16 @@ impl TCPServer{
 
         self.appData.log.print(format!("[INFO] TCP server is ready"));
 
-        let mut reregisterList=Vec::with_capacity(self.appData.serverConfig.server_connectionsLimit);
-
         while {*self.server.state.read().unwrap()}==ServerState::Processing {
             let eventsNumber=try!(self.poll.poll(&mut self.events, Some(Duration::new(0,100_000_000)) ).or(Err(String::from("Can not get eventsNumber")) ) );
-
-            /*
-            {
-                let server=self.server.clone();
-                let mut reregisterTCPConnectionsGuard=server.reregisterTCPConnections.lock().unwrap();
-
-                self.reregisterConnections( &mut (*reregisterTCPConnectionsGuard) );
-            }
-            */
 
             for i in 0..eventsNumber {
                 let event = try!(self.events.get(i).ok_or(String::from("Can not get event") ) );
 
-                self.processEvent(event.token(), event.kind(), &mut reregisterList);
+                self.processEvent(event.token(), event.kind());
             }
 
-            self.reregisterConnections( &mut reregisterList );
+            self.reregisterConnections();
 
             self.processTick();
         }
@@ -91,18 +73,12 @@ impl TCPServer{
         self.onServerShutdown()
     }
 
-    fn reregisterConnections(&mut self, reregisterList:&mut Vec<Token>){
+    fn reregisterConnections(&mut self){
         let connectionsGuard=self.server.tcpConnections.read().unwrap();
 
-        for connectionToken in reregisterList.iter(){
-            let connection=& (*connectionsGuard)[*connectionToken];
-
-            if connection.isActive() {
-                connection.reregister(&mut self.poll).unwrap_or_else(|e| { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e)); });
-            }
+        for connection in (*connectionsGuard).iter() {
+            connection.reregister(&mut self.poll).unwrap_or_else(|e| { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e)); });
         }
-
-        reregisterList.clear();
     }
 
     fn processTick(&mut self) {
@@ -141,7 +117,7 @@ impl TCPServer{
         }
     }
 
-    fn processEvent(&mut self, token: Token, event: Ready, reregisterConnections: &mut Vec<Token>) {
+    fn processEvent(&mut self, token: Token, event: Ready) {
         //Error with connection has been occured
         if event.is_error() {
             println!("error!!");
@@ -173,6 +149,7 @@ impl TCPServer{
             if self.token == token {    //accept new connection
                 self.processAccept();
             } else {     //process read event for connection[token]
+                println!("read!!");
                 let buffer=&mut self.buffer;
 
                 let packetResult=self.server.getTCPConnectionAnd(token, |connection| {
@@ -200,13 +177,6 @@ impl TCPServer{
                 }
             }
         }
-
-
-        //reregister
-        if self.token!=token {
-            reregisterConnections.push(token);
-        }
-
     }
 
     fn processAccept(&mut self) {
@@ -256,18 +226,6 @@ impl TCPServer{
         })
     }
 
-    fn processEventOnServerShutdown(&mut self, token: Token, event: Ready) {
-        println!("dd!!");
-        if event.is_writable() {
-            println!("write!!");
-            self.server.getTCPConnectionAnd(token, |connection| {
-                if !connection.shouldReset() { //isActive пропускается, чтобы отправить прощальное сообщение
-                    connection.writeMessages().unwrap_or_else(|e| { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e) ); });
-                }
-            });
-        }
-    }
-
     fn onServerShutdown(&mut self) -> Result<(),String> {
         //Disconnect by reason ServerShutdown
         {
@@ -290,8 +248,10 @@ impl TCPServer{
             for i in 0..eventsNumber {
                 let event = try!(self.events.get(i).ok_or(String::from("Can not get event") ) );
 
-                self.processEventOnServerShutdown(event.token(), event.kind());
+                self.processEvent(event.token(), event.kind());
             }
+
+            self.reregisterConnections();
         }
 
         {

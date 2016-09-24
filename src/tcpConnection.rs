@@ -20,6 +20,8 @@ use time::get_time;
 use server::{Server,DisconnectionReason,DisconnectionSource};
 use tcpServer::TCPServer;
 
+use packet::{ServerToClientTCPPacket, ClientToServerTCPPacket};
+
 /*
 причины disconnect:
 Error (detected by TCP)
@@ -33,6 +35,18 @@ ConnectionLost(detected by UDP)
 Kick
     помечаем isActive=false, отправляем сообщение
 */
+
+const STATE_WAITSESSIONID_TIMEOUT: i64 = 10;
+const STATE_LOGIN_OR_REGISTER_TIMEOUT: i64 = 10;
+const STATE_LOGIN_OR_REGISTER_ATTEMPTS_LIMIT: usize = 3;
+
+enum TCPConnectionState{
+    WaitSessionID(i64),
+    LoadingPlayerDataFromMasterServer(i64),
+    LoginOrRegister(i64, usize),
+    CreatingUDPConnection(i64),
+    PlayerIsReady,
+}
 
 
 
@@ -48,7 +62,8 @@ pub struct TCPConnection{
     sendQueue: Mutex< VecDeque<Vec<u8>> >,
     readContinuation:Mutex<Option<u32>>,
 
-    pub timeoutBegin:Mutex<Option<Timespec>>, //вообще для тцп он не нужен(не нужно подтверждать соединение), только для прощального пакета
+    state:Mutex<TCPConnectionState>,
+    //pub timeoutBegin:Mutex<Option<Timespec>>, //вообще для тцп он не нужен(не нужно подтверждать соединение), только для прощального пакета
 }
 
 
@@ -66,7 +81,7 @@ impl TCPConnection{
             sendQueue: Mutex::new( VecDeque::with_capacity(32) ),
             readContinuation: Mutex::new(None),
 
-            timeoutBegin: Mutex::new( None ),
+            state:Mutex::new( TCPConnectionState::WaitSessionID( get_time().sec+STATE_WAITSESSIONID_TIMEOUT ) ),
         }
     }
 
@@ -168,6 +183,7 @@ impl TCPConnection{
         }
 
         if sendQueueGuard.len()==0 {
+            println!("writen");
             self.interest.lock().unwrap().remove(Ready::writable());
         }
 
@@ -175,6 +191,8 @@ impl TCPConnection{
     }
 
     pub fn sendMessage(&self, msg:Vec<u8>){
+        println!("send: {}",msg.len());
+
         self.sendQueue.lock().unwrap().push_front(msg);
 
         let mut interestGuard=self.interest.lock().unwrap();
@@ -182,6 +200,8 @@ impl TCPConnection{
         if !(*interestGuard).is_writable() {
             (*interestGuard).insert(Ready::writable());
         }
+
+        //(*self.server.reregisterTCPConnections.lock().unwrap()).push(self.token);
     }
 
     pub fn register(&self, poll: &mut Poll) -> Result<(), &'static str> {
@@ -217,6 +237,39 @@ impl TCPConnection{
         *self.shouldReset.lock().unwrap()
     }
 
+    pub fn check(&self){
+        if self.shouldReset() {
+            return ;
+        }
+
+        let mut stateGuard=self.state.lock().unwrap();
+        match *stateGuard {
+            TCPConnectionState::WaitSessionID( timeout ) => {
+                if get_time().sec>=timeout {
+                    self.disconnect( DisconnectionReason::Kick( DisconnectionSource::TCP, String::from("Expectation Session ID timeout")) );
+                }
+            },
+            TCPConnectionState::LoadingPlayerDataFromMasterServer( timeout ) => {
+                if get_time().sec>=timeout {//не удалось подключиться к главному серверу - предложим зарегаться или залогиниться
+                    //send message
+                    (*stateGuard)=TCPConnectionState::LoginOrRegister( get_time().sec + STATE_LOGIN_OR_REGISTER_TIMEOUT, 0 );
+                }
+            },
+            TCPConnectionState::LoginOrRegister( timeout, attemptsNumber ) => {
+                if get_time().sec>=timeout {
+                    self.disconnect( DisconnectionReason::Kick( DisconnectionSource::TCP, String::from("Expectation Login timeout")) );
+                }
+            },
+            TCPConnectionState::CreatingUDPConnection( timeout ) => {
+                if get_time().sec>=timeout {
+                    self.disconnect( DisconnectionReason::Kick( DisconnectionSource::TCP, String::from("Expectation UDP Connection timeout")) );
+                }
+            }
+            TCPConnectionState::PlayerIsReady => {},
+        }
+
+    }
+
     /*
     причины disconnect:
     Error (detected by TCP)
@@ -250,7 +303,7 @@ impl TCPConnection{
                         }
                     },
                     DisconnectionSource::UDP | DisconnectionSource::Player=> {
-                        //sendMessage
+                        self.sendMessage( ServerToClientTCPPacket::Disconnect{ reason:String::from("Connection error") }.pack() );
                     },
                 }
             },
@@ -279,7 +332,7 @@ impl TCPConnection{
                     DisconnectionSource::UDP | DisconnectionSource::Player=> {},
                 }
 
-                //send message
+                self.sendMessage( ServerToClientTCPPacket::Disconnect{ reason:message.clone() }.pack() );
             },
             DisconnectionReason::ServerShutdown => {
                 match *playerGuard {
@@ -288,7 +341,7 @@ impl TCPConnection{
                     None => {},
                 }
 
-                //send message
+                self.sendMessage( ServerToClientTCPPacket::Disconnect{ reason:String::from("Server shutdown") }.pack() );
             },
             DisconnectionReason::Hup( ref source ) => {
                 *self.shouldReset.lock().unwrap()=true;

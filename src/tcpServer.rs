@@ -34,6 +34,13 @@ pub struct TCPServer{
     pub buffer: Vec<u8>,
 }
 
+/*
+А нужно ли ререгистрировать неактивные соединения(writeable) ? да, но другим методом:
+вообще после sendMessage и добавления интереса надо перерегистрировать, но это заставляет юзать poll, его можно либо положить с сервером(смысла нет тк он залочен)
+либо сделать список в сервере,коого надо перергистрировать, а потом прибавть к event-ным. так и сделаю
+после НЕ последней обработки так же надо перерегистрировать
+*/
+
 impl TCPServer{
     pub fn process(&mut self) -> Result<(),String>{
         try!(self.register().or(Err(String::from("Can not register server poll")) ) );
@@ -60,7 +67,15 @@ impl TCPServer{
 
         while {*self.server.state.read().unwrap()}==ServerState::Processing {
             let eventsNumber=try!(self.poll.poll(&mut self.events, Some(Duration::new(0,100_000_000)) ).or(Err(String::from("Can not get eventsNumber")) ) );
-            //периодически выходить по таймауту
+
+            /*
+            {
+                let server=self.server.clone();
+                let mut reregisterTCPConnectionsGuard=server.reregisterTCPConnections.lock().unwrap();
+
+                self.reregisterConnections( &mut (*reregisterTCPConnectionsGuard) );
+            }
+            */
 
             for i in 0..eventsNumber {
                 let event = try!(self.events.get(i).ok_or(String::from("Can not get event") ) );
@@ -108,22 +123,9 @@ impl TCPServer{
             let tcpConnectionsGuard=self.server.tcpConnections.read().unwrap();
 
             for connection in (*tcpConnectionsGuard).iter() {
-                let removeConnection=if connection.shouldReset() {
-                    true
-                /*
-                }else{
-                    //match connection.
-                     if !connection.isActive() && (*connection.activityTime.lock().unwrap()).sec+ACTIVITY_DISCONNECT_DELAY < get_time().sec {
-                    true
-                }else if (*connection.activityTime.lock().unwrap()).sec+ACTIVITY_CONNECTION_LOST_DELAY < get_time().sec {
-                    connection.disconnect(DisconnectionReason::ConnectionLost( DisconnectionSource::TCP ) );
-                    true
-                */
-                }else{
-                    false
-                };
+                let removeConnection=connection.check();
 
-                if removeConnection {
+                if connection.shouldReset() {
                     removeConnections.push(connection.token);
                     connection.deregister(&mut self.poll);
                 }
@@ -185,7 +187,12 @@ impl TCPServer{
                 });
 
                 match packetResult{
-                    Ok ( None ) => {},
+                    Ok ( None ) => {
+                        self.server.getTCPConnectionAnd(token, |connection| {
+                            use packet::ServerToClientTCPPacket;
+                            connection.sendMessage( ServerToClientTCPPacket::Disconnect{ reason:String::from("LOL") }.pack() );
+                        });
+                    },
                     Ok ( Some(playerID) ) => {
                         //get player and...
                     },
@@ -194,10 +201,12 @@ impl TCPServer{
             }
         }
 
+
         //reregister
         if self.token!=token {
             reregisterConnections.push(token);
         }
+
     }
 
     fn processAccept(&mut self) {
@@ -221,7 +230,7 @@ impl TCPServer{
                     entry.insert(connection).index()
                 },
                 None => {
-                    self.appData.log.print( String::from("[ERROR] Server: Failed to insert tcp connection into slab(maybe connectionsLimit has been exceeded") );
+                    self.appData.log.print( String::from("[ERROR] Server: Failed to insert tcp connection into slab(maybe connectionsLimit has been exceeded)") );
                     return;
                 }
             };
@@ -229,7 +238,7 @@ impl TCPServer{
             match (*connectionsGuard)[token].register(&mut self.poll) {
                 Ok(_) => {},
                 Err(e) => {
-                    self.appData.log.print( format!("[ERROR] Server: Failed to register tcp conenction {:?} connection with poll, {:?}", token, e) );
+                    self.appData.log.print( format!("[ERROR] Server: Failed to register tcp conenction {:?} with poll : {:?}", token, e) );
                     (*connectionsGuard).remove(token);
                 }
             }
@@ -248,6 +257,7 @@ impl TCPServer{
     }
 
     fn processEventOnServerShutdown(&mut self, token: Token, event: Ready) {
+        println!("dd!!");
         if event.is_writable() {
             println!("write!!");
             self.server.getTCPConnectionAnd(token, |connection| {
@@ -266,10 +276,9 @@ impl TCPServer{
             for connection in (*tcpConnectionsGuard).iter() {
                 if connection.isActive() {
                     connection.disconnect(DisconnectionReason::ServerShutdown);
+                    connection.reregister(&mut self.poll);
                 }
             }
-
-            (*tcpConnectionsGuard).clear();
         }
 
         let waitTimeBegin=get_time();

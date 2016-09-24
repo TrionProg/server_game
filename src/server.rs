@@ -91,6 +91,8 @@ pub struct Server{
     pub tcpConnections: RwLock<Slab< TCPConnection , Token>>,
     //udpConnections: RwLock<Slab< UDPConnection , u32>>,
     pub players: RwLock<Slab< Player , usize>>,
+
+    pub reregisterTCPConnections:Mutex<Vec<Token>>,
 }
 
 impl Server{
@@ -113,6 +115,8 @@ impl Server{
             tcpConnections:RwLock::new(Slab::with_capacity(appData.serverConfig.server_connectionsLimit)),
             //udpConnections: RwLock<Slab< UDPConnection , u32>>,
             players:RwLock::new(Slab::with_capacity(appData.serverConfig.server_playersLimit)),
+
+            reregisterTCPConnections:Mutex::new(Vec::with_capacity(appData.serverConfig.server_connectionsLimit)),
         };
 
         let server=Arc::new(server);

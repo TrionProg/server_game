@@ -69,6 +69,8 @@ extern crate mio;
 extern crate slab;
 extern crate time;
 extern crate byteorder;
+extern crate rustc_serialize;
+extern crate bincode;
 
 use std::env;
 use std::thread;
@@ -89,6 +91,7 @@ mod server;
 mod tcpServer;
 mod tcpConnection;
 mod player;
+mod packet;
 
 
 use appData::AppData;

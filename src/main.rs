@@ -92,6 +92,7 @@ mod tcpServer;
 mod tcpConnection;
 mod player;
 mod packet;
+mod httpRequester;
 
 
 use appData::AppData;
@@ -100,6 +101,7 @@ use serverConfig::ServerConfig;
 use gameState::GameState;
 //use adminServer::AdminServer;
 use storage::Storage;
+use httpRequester::HTTPRequester;
 use server::Server;
 
 
@@ -158,19 +160,49 @@ fn main() {
         return;
     }
 
+    //==============HTTP Requester====================
+
+    match HTTPRequester::initialize( appData.clone() ) {
+        Ok ( _ ) => appData.log.print(String::from("[INFO] HTTP Requester has been initialized")),
+        Err( e ) => {
+            appData.log.print(format!("[ERROR] Can not initialize HTTP Requester:{}",e));
+            AppData::destroy( appData );
+            return;
+        }
+    }
+
     //===================Server========================
 
     match Server::start( appData.clone() ) {
         Ok ( _ ) => appData.log.print(String::from("[INFO] Server has been started")),
         Err( e ) => {
             appData.log.print(format!("[ERROR] Can not start server:{}",e));
-            //remove storage?
+            AppData::destroy( appData );
             return;
         }
     }
 
+    appData.getHTTPRequesterAnd(|httpRequester| httpRequester.addRequest(
+        String::from("5.255.255.70:80"),
+        String::from("GET / HTTP/1.1\r\nHost: yandex.ru\r\n\r\n").into_bytes(),
+        10
+    ));
 
-    thread::sleep_ms(5000);
+    appData.getHTTPRequesterAnd(|httpRequester| httpRequester.addRequest(
+        String::from("5.255.255.70:80"),
+        String::from("GET / HTTP/1.1\r\nHost: https://yandex.ru\r\n\r\n").into_bytes(),
+        10
+    ));
+
+    thread::sleep_ms(3000);
+
+    appData.getHTTPRequesterAnd(|httpRequester| httpRequester.addRequest(
+        String::from("5.255.255.70:80"),
+        String::from("GET / HTTP/1.1\r\nHost: https://yandex.ru\r\n\r\n").into_bytes(),
+        10
+    ));
+
+    thread::sleep_ms(10000);
 
     AppData::destroy( appData );
 

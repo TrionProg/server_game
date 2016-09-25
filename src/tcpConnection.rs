@@ -4,7 +4,6 @@ use std::sync::{Mutex,Arc,RwLock,Weak};
 use std::io;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
-use std::rc::Rc;
 
 use byteorder::{ByteOrder, BigEndian};
 
@@ -143,6 +142,7 @@ impl TCPConnection{
 
         let mut buf=[0u8;4];
 
+        //а он не может случайно прочесть 3 байта?!
         let bytes = match (*socketGuard).read(&mut buf) {
             Ok(n) => n,
             Err(e) => {

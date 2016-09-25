@@ -1,34 +1,65 @@
+use std::thread;
+use std::thread::JoinHandle;
+use std::sync::{Mutex,Arc,RwLock,Weak};
 
 use mio::*;
 use mio::tcp::*;
-use slab::Slab; //не slab, а slabCash
+use slab::Slab;
+use std::net::SocketAddr;
+
+use std::io;
+use std::io::prelude::*;
+use std::io::{Error, ErrorKind};
+
+use time::{get_time};
+use std::time::Duration;
 
 use std::collections::VecDeque;
 
-const  REQUESTS_LIMIT: i64 = 256;
-const  REQUEST_SEND_LENGTH: i64 = 256;
+use appData::AppData;
+
+const  REQUESTS_LIMIT: usize = 256;
+const  REQUEST_SEND_LENGTH: usize = 16;
+const  KEEP_ALIVE_TIMEOUT: i64 = 5;
 
 #[derive(PartialEq, Eq, Copy, Clone)]
 pub enum HTTPRequesterState{
     Initialization,
     Processing,
-    Stop,
+    Destroy,
+    Error,
+}
+
+#[derive(PartialEq, Eq, Copy, Clone)]
+enum HTTPRequestState{
+    WritingRequest,
+    ReadingHeader,
+    ReadingBody,
+    Processing,
+    Processed, //may be used again
     Error,
 }
 
 struct HTTPRequest{
     pub token: Token,
+    pub address:String,
     socket: TcpStream,
+    state:HTTPRequestState,
     timeout: i64,
+
     buffer: Vec<u8>,
-    request: Option<String, usize>,
-    interest: Ready,
-    remove: bool,
+    cursor:usize,
+    begin:usize,
+
+    responseCode:usize,
+    contentLength:usize,
+
+    //onProcess:FnOnce(usize, &[u8]) -> (),
 }
 
 pub struct HTTPRequester{
     pub appData:Weak<AppData>,
-    pub state:RwLock<ServerState>,
+    pub state:RwLock<HTTPRequesterState>,
 
     threadJoinHandle:Mutex<Option<JoinHandle<()>>>,
 
@@ -37,7 +68,7 @@ pub struct HTTPRequester{
 
 struct HTTPRequesterCore{
     appData:Arc<AppData>,
-    requester::Arc<HTTPRequester>,
+    requester:Arc<HTTPRequester>,
     requests: Slab< HTTPRequest , Token>,
     poll: Poll,
     events: Events,
@@ -47,13 +78,13 @@ impl HTTPRequester{
     pub fn initialize( appData:Arc<AppData> ) -> Result<(), String> {
         appData.log.print(format!("[INFO] Initializing HTTP Requester"));
 
-        let requester=Requester{
+        let requester=HTTPRequester{
             appData:Arc::downgrade(&appData),
             state:RwLock::new(HTTPRequesterState::Initialization),
 
             threadJoinHandle:Mutex::new(None),
 
-            addRequests:Mutex::new(Vec::with_capacity(16)),
+            addRequests:Mutex::new(VecDeque::with_capacity(16)),
         };
 
         let requester=Arc::new(requester);
@@ -66,16 +97,14 @@ impl HTTPRequester{
             events:Events::with_capacity(REQUESTS_LIMIT),
         };
 
-        let requester=Arc::new(requester);
-
         let threadJoinHandle=thread::spawn(move||{
             match httpRequesterCore.process(){
-                Ok ( _ ) => { httpRequesterCore.appData.log.print(format!("[INFO] HTTP Requester has been stoped")); },
+                Ok ( _ ) => { httpRequesterCore.appData.log.print(format!("[INFO] HTTP Requester has been destroyed")); },
                 Err( e ) => {
                     httpRequesterCore.appData.log.print( format!("[ERROR] HTTP Requester: {}", e) );
 
                     *httpRequesterCore.requester.threadJoinHandle.lock().unwrap()=None; //чтобы не было join самого себя
-                    HTTPRequester::stop(httpRequesterCore.requester);
+                    HTTPRequester::destroy(httpRequesterCore.requester);
                 }
             }
         });
@@ -91,17 +120,17 @@ impl HTTPRequester{
         *requester.threadJoinHandle.lock().unwrap()=Some(threadJoinHandle);
 
         //а теперь добавляем данный модуль
-        *appData.httpRequester.write().unwrap()=Some(server);
+        *appData.httpRequester.write().unwrap()=Some(requester);
 
         Ok(())
     }
 
-    pub fn stop( requester:Arc<HTTPRequester> ){
+    pub fn destroy( requester:Arc<HTTPRequester> ){
         if {*requester.state.read().unwrap()}==HTTPRequesterState::Processing {
-            requester.appData.upgrade().unwrap().log.print( String::from("[INFO] Stoping HTTP Requester") );
+            requester.appData.upgrade().unwrap().log.print( String::from("[INFO] Destroying HTTP Requester") );
         }
 
-        *requester.state.write().unwrap()=HTTPRequesterState::Stop;
+        *requester.state.write().unwrap()=HTTPRequesterState::Destroy;
 
         let appData=requester.appData.upgrade().unwrap();
 
@@ -115,123 +144,80 @@ impl HTTPRequester{
         //теперь вызовется drop для requester
     }
 
-    pub fn addRequest(&self, address:String, request:Vec<u8>, timeout:u64) -> Result<(), String>{
-        addRequests.lock().unwrap().push( (address,request,timeout) );
+    pub fn addRequest(&self, address:String, request:Vec<u8>, timeout:usize) {
+        self.addRequests.lock().unwrap().push_front( (address,request,timeout) );
     }
 }
 
 impl HTTPRequesterCore{
     fn process( &mut self ) -> Result<(),String>{
-        self.state.write().unwrap()=HTTPRequesterState::Processing;
+        *self.requester.state.write().unwrap()=HTTPRequesterState::Processing;
 
-        self.appData.log.print(format!("[INFO] HTTP Requester server is ready"));
-
-        let mut reregisterList=Vec::with_capacity(REQUESTS_LIMIT);
-
-        while {*self.state.read().unwrap()}==HTTPRequesterState::Processing {
+        while {*self.requester.state.read().unwrap()}==HTTPRequesterState::Processing {
             let eventsNumber=try!(self.poll.poll(&mut self.events, Some(Duration::new(0,100_000_000)) ).or(Err(String::from("Can not get eventsNumber")) ) );
 
             for i in 0..eventsNumber {
-                let event = try!(requster.events.get(i).ok_or(String::from("Can not get event") ) );
+                let event = try!(self.events.get(i).ok_or(String::from("Can not get event") ) );
 
-                self.processEvent(event.token(), event.kind(), &mut reregisterList);
+                self.processEvent(event.token(), event.kind());
             }
-
-            self.reregisterRequests( &mut reregisterList );
 
             self.checkRequests();
 
             self.addRequests();
         }
+
+        self.onHttpRequesterShutdown();
+
+        Ok(())
     }
 
-    fn processEvent(&mut self, token: Token, event: Ready, reregisterList: &mut Vec<Token>) {
+    fn processEvent(&mut self, token: Token, event: Ready) {
         //Error with request has been occured
         if event.is_error() {
             self.appData.log.print(format!("[ERROR] HTTP Requester : request {:?} error", token));
-            self.requests[token].remove=true;
+            self.requests[token].state=HTTPRequestState::Error;
 
             return;
         }
 
         //Request has been closed -- response is ready
         if event.is_hup() {
-            println!("closure!!");
-            self.requests[token].remove=true;
+            self.appData.log.print(format!("[ERROR] HTTP Requester : request {:?} : connection has been refused", token));
+            self.requests[token].state=HTTPRequestState::Error;
 
             return;
         }
 
         //Write request
         if event.is_writable() {
-            let request=&mut self.requests[token];
-
-            match request.request {
-                Some( buffer, ref cursor ) {
-                    let length=if buffer.len()-cursor > REQUEST_SEND_LENGTH { REQUEST_SEND_LENGTH } else { buffer.len()-cursor };
-
-                    match request.socket.write(&buffer[cursor..cursor+length]) {
-                        Ok(n) => {
-                            cursor+=length;
-
-                            if buffer.len() == cursor {
-                                request.request=None;
-                                request.interest.remove(Ready::writable());
-                            }
-                        },
-                        Err(e) => {
-                            if e.kind() != ErrorKind::WouldBlock {
-                                self.appData.log.print(format!("[ERROR] HTTP Requester : request {:?} write error", token));
-                                self.requests[token].remove=true;
-
-                                return;
-                            }
-                        }
-                    }
-                },
-                None =>
-                    request.interest.remove(Ready::writable()),
+            println!("write");
+            match self.requests[token].writeRequest(&mut self.poll) {
+                Ok ( _ ) => {},
+                Err( e ) => self.appData.log.print(format!("[ERROR] HTTP Requester : request {:?} : {}", token, e)),
             }
         }
 
         //Read response
         if event.is_readable() {
-            match request.read_to_end(&mut request.buffer) {
-                Ok ( n ) => {},
-                Err( e ) => {
-                    if e.kind() != ErrorKind::WouldBlock { // Try to read message on next event
-                        self.appData.log.print(format!("[ERROR] HTTP Requester : request {:?} read error", token));
-                        self.requests[token].remove=true;
-
-                        return;
-                    }
-                },
+            println!("read");
+            match self.requests[token].readResponse(&mut self.poll) {
+                Ok ( _ ) => {},
+                Err( e ) => self.appData.log.print(format!("[ERROR] HTTP Requester : request {:?} : {}", token, e)),
             }
         }
-
-        reregisterList.push(token);
-    }
-
-    fn reregisterConnections(&mut self, reregisterList:&mut Vec<Token>){
-        for requestToken in reregisterList.iter(){
-            let request=&mut request[Token];
-
-            if !request.remove {
-                request.reregister(&mut self.poll).unwrap_or_else(|e| {
-                    self.appData.log.print(format!("[ERROR] HTTP Requester : can not reregiter request {:?}", requestToken));
-                    request.remove=true;
-                });
-            }
-        }
-
-        reregisterList.clear();
     }
 
     fn checkRequests(&mut self){
         let mut removeRequests = Vec::new();
 
         for request in self.requests.iter() {
-            if request.remove || get_time().sec >= request.timeout  {
+            let removeRequest=match request.state{
+                HTTPRequestState::Error => true,
+                _ => get_time().sec >= request.timeout,
+            };
+
+            if removeRequest {
                 removeRequests.push(request.token);
                 request.deregister(&mut self.poll);
             }
@@ -244,74 +230,349 @@ impl HTTPRequesterCore{
 
 
     fn addRequests(&mut self) {
-        let addRequestsGuard=self.requester.addRequests.lock().unwrap();
+        //prepare list of processed requests
+        let mut vacantRequests=Vec::with_capacity(16);
 
-        for (address, request, timeout) in (*addRequestsGuard).pop_back() {
-            let token=match self.requests.vacant_entry() {
-                Some(entry) => {
-                    match HTTPRequest::new(entry.index(), address, request, timeout){
-                        Ok (httpRequest) => entry.insert( httpRequest ),
-                        Err(e) => {
-                            self.appData.log.print( format!("[ERROR] HTTPRequester: {}",e) );
-                            continue;
-                        },
-                    }
-
-                    entry.index()
-                },
-                None => {
-                    self.appData.log.print( String::from("[WARNING] HTTPRequester: Failed to insert request into slab, I will try later") );
-                    (*addRequestsGuard).push_back((address,request,timeout));
-                    return;
-                }
-            };
-
-            match self.requests[token].register(&mut self.poll) {
-                Ok(_) => {},
-                Err(e) => {
-                    self.appData.log.print( format!("[ERROR] HTTPRequester: Failed to register request {:?} with poll : {:?}", token, e) );
-                    self.requests.remove(token);
-                }
+        for request in self.requests.iter() {
+            match request.state{
+                HTTPRequestState::Processed => vacantRequests.push( (request.address.clone(), request.token) ),
+                _ => {},
             }
         }
+
+        //add requests
+
+        let mut addRequestsGuard=self.requester.addRequests.lock().unwrap();
+
+        for (address, request, timeout) in (*addRequestsGuard).pop_back() {
+            let mut vacantRequestIndex=None;
+
+            for (index, &( ref reqAddress, ref reqToken )) in vacantRequests.iter().enumerate(){
+                if address==*reqAddress {
+                    vacantRequestIndex=Some(index);
+                    break;
+                }
+            }
+
+            match vacantRequestIndex {
+                Some(index) => {
+                    let reqToken=vacantRequests[index].1;
+
+                    match self.requests[reqToken].nextRequest( &mut self.poll, address, request, timeout ){
+                        Ok ( _ ) => {},
+                        Err( e ) => self.appData.log.print( format!("[ERROR] HTTPRequester: Failed to use keep alive request {:?} : {}", reqToken, e) ),
+                    }
+
+                    vacantRequests.remove(index);
+                },
+                None => {
+                    let token=match self.requests.vacant_entry() {
+                        Some(entry) => {
+                            match HTTPRequest::new(entry.index(), address, request, timeout){
+                                Ok (httpRequest) => entry.insert( httpRequest ).index(),
+                                Err(e) => {
+                                    self.appData.log.print( format!("[ERROR] HTTPRequester: {}",e) );
+                                    continue;
+                                },
+                            }
+                        },
+                        None => {
+                            self.appData.log.print( String::from("[WARNING] HTTPRequester: Failed to insert request into slab, I will try later") );
+                            (*addRequestsGuard).push_back((address,request,timeout));
+                            return;
+                        }
+                    };
+
+                    match self.requests[token].register(&mut self.poll) {
+                        Ok(_) => {},
+                        Err(e) => {
+                            self.appData.log.print( format!("[ERROR] HTTPRequester: Failed to register request {:?} with poll : {:?}", token, e) );
+                            self.requests.remove(token);
+                        }
+                    }
+                }
+            }
+
+        }
+    }
+
+    fn onHttpRequesterShutdown(&mut self){
+        for request in self.requests.iter() {
+            request.deregister(&mut self.poll);
+        }
+
+        self.requests.clear();
     }
 }
 
 impl HTTPRequest{
     fn new(token:Token, address:String, request:Vec<u8>, timeout:usize) -> Result<HTTPRequest, String> {
-        let addr = try!((&address).parse::<SocketAddr>().or( Err(format!("Can not use server address : {}", &address)) ));
+        let addr = try!((&address).parse::<SocketAddr>().or( Err(format!("Can not determine server address : {}", &address)) ));
         let socket=try!(TcpStream::connect(&addr).or( Err(format!("Can not create tcp socket for address : {}", &address)) ));
 
         Ok(HTTPRequest{
             token: token,
+            address: address,
             socket: socket,
+            state:HTTPRequestState::WritingRequest,
             timeout: get_time().sec+timeout as i64,
-            buffer: Vec::with_capacity(128),
-            request: Option<request, 0>,
-            interest: Ready::all(),
-            remove: false,
+
+            buffer: request,
+            begin:0,
+            cursor:0,
+
+            responseCode:0,
+            contentLength:0,
         })
     }
 
-    pub fn register(&mut self, poll: &mut Poll) -> Result<(), &'static str> {
+    fn nextRequest(&mut self, poll: &mut Poll, address:String, request:Vec<u8>, timeout:usize) -> Result<(), String> {
+        let addr = try!((&address).parse::<SocketAddr>().or( Err(format!("Can not determine server address : {}", &address)) ));
+        let socket=try!(TcpStream::connect(&addr).or( Err(format!("Can not create tcp socket for address : {}", &address)) ));
+
+        self.address=address;
+        self.state=HTTPRequestState::WritingRequest;
+        self.timeout=get_time().sec+timeout as i64;
+        self.buffer=request;
+        self.begin=0;
+        self.cursor=0;
+        self.responseCode=0;
+        self.contentLength=0;
+
+        match self.reregister(poll) {
+            Ok ( _ ) => Ok(()),
+            Err( e ) => Err(String::from(e)),
+        }
+    }
+
+    fn writeRequest(&mut self, poll: &mut Poll) -> Result<(), &'static str>{
+        match self.state {
+            HTTPRequestState::WritingRequest => {
+                let length=if self.buffer.len()-self.cursor > REQUEST_SEND_LENGTH { REQUEST_SEND_LENGTH } else { self.buffer.len()-self.cursor };
+
+                match self.socket.write(&self.buffer[self.cursor..self.cursor+length]) {
+                    Ok(n) => {
+                        self.cursor+=length;
+
+                        if self.buffer.len() == self.cursor {
+                            self.state=HTTPRequestState::ReadingHeader;
+
+                            self.buffer.clear();
+                            self.begin=0;
+                            self.cursor=0;
+
+                            self.responseCode=0;
+                            self.contentLength=0;
+                        }
+                    },
+                    Err(e) => {
+                        if e.kind() != ErrorKind::WouldBlock {
+                            self.state=HTTPRequestState::Error;
+
+                            return Err("write error");
+                        }
+                    }
+                }
+            },
+            _=>{},
+        };
+
+        self.reregister( poll );
+
+        Ok(())
+    }
+
+    fn readResponse(&mut self, poll: &mut Poll) -> Result<(), &'static str> {
+        let mut buf=[0u8;256];
+
+        loop{
+            match self.socket.read(&mut buf) {
+                Ok ( n ) => {self.buffer.extend_from_slice(&buf[0..n]) },
+                Err( e ) => {
+                    if e.kind() != ErrorKind::WouldBlock { // Try to read message on next event
+                        self.state=HTTPRequestState::Error;
+
+                        return Err("read error");
+                    }
+
+                    break;
+                },
+            }
+        }
+
+        loop{
+            match self.state {
+                HTTPRequestState::ReadingHeader => {
+                    let mut lineEnd=None;
+                    let mut cur=self.cursor;
+
+                    while cur<self.buffer.len() {
+                        if self.buffer[cur]==b'\r' {
+                            lineEnd=Some(cur);
+                            break;
+                        }
+
+                        cur+=1;
+                    }
+
+                    match lineEnd {
+                        Some( endLinePos ) => {
+                            self.parseLine( endLinePos );
+                            self.begin=endLinePos+2;
+                            self.cursor=endLinePos+2;
+                        },
+                        None => self.cursor=cur,
+                    }
+
+                    if self.cursor>=self.buffer.len() {
+                        break;
+                    }
+                },
+                HTTPRequestState::ReadingBody => {
+                    let mut cur=self.cursor;
+
+                    while cur<self.buffer.len() {
+                        cur+=1;
+
+                        if cur-self.begin==self.contentLength {
+                            self.state=HTTPRequestState::Processing;
+                            break;
+                        }
+                    }
+
+                    self.cursor=cur;
+
+                    if self.cursor>=self.buffer.len() {
+                        break;
+                    }
+                },
+                _=>break,
+            }
+        }
+
+        match self.state {
+            HTTPRequestState::Processing => {
+                println!("Processing {} {} {} {}",self.responseCode, self.begin, self.cursor, self.buffer.len() );
+
+                self.state=HTTPRequestState::Processed;
+                self.timeout=get_time().sec+KEEP_ALIVE_TIMEOUT;
+            },
+            HTTPRequestState::Processed | HTTPRequestState::Error => {},
+            _=>{
+                match self.reregister(poll) {
+                    Ok ( _ ) => {},
+                    Err( e ) => return Err(e),
+                }
+            },
+        }
+
+        Ok(())
+    }
+
+    fn parseLine(&mut self, lineEnd:usize){
+        let lineBegin=self.begin;
+
+        if lineBegin==lineEnd {
+            if self.contentLength>0 {
+                self.state=HTTPRequestState::ReadingBody;
+            }else{
+                self.state=HTTPRequestState::Processing;
+            }
+
+            return;
+        }
+
+        let mut cur=lineBegin;
+
+        while self.buffer[cur]==b' ' { //ends on letter or \r
+            cur+=1;
+        }
+
+        match self.buffer[cur]{
+            b'H' => {
+                let caption=b"HTTP/1.1 ";
+
+                for i in 0..caption.len(){
+                    if self.buffer[cur+i]!=caption[i] {
+                        return;
+                    }
+                }
+
+                cur+=caption.len();
+
+                while self.buffer[cur]==b' ' { cur+=1; }
+
+                let mut responseCode=0;
+
+                for i in 0..3 {
+                    responseCode*=10;
+                    responseCode+=(self.buffer[cur+i]-b'0') as usize;
+                }
+
+                self.responseCode=responseCode;
+            },
+            b'C' => {
+                let caption=b"Content-Length:";
+
+                for i in 0..caption.len(){
+                    if self.buffer[cur+i]!=caption[i] {
+                        return;
+                    }
+                }
+
+                cur+=caption.len();
+
+                while self.buffer[cur]==b' ' { cur+=1; }
+
+                let mut contentLength=0;
+
+                while self.buffer[cur]>=b'0' && self.buffer[cur]<=b'9' {
+                    contentLength*=10;
+                    contentLength+=(self.buffer[cur]-b'0') as usize;
+
+                    cur+=1;
+                }
+
+                self.contentLength=contentLength;
+            },
+            _=> {},
+        }
+    }
+
+    fn register(&mut self, poll: &mut Poll) -> Result<(), &'static str> {
+        let interest=Ready::hup() | Ready::error() | Ready::writable();
+
         poll.register(
             &self.socket,
             self.token,
-            Ready::all(),//self.interest,
+            interest,
             PollOpt::edge() | PollOpt::oneshot()
         ).or_else(|e|
-            Err("Can not register connection")
+            Err("Can not register HTTP Request")
         )
     }
 
-    pub fn reregister(&mut self, poll: &mut Poll) -> Result<(), &'static str> {
+    fn reregister(&mut self, poll: &mut Poll) -> Result<(), &'static str> {
+        match self.state {
+            HTTPRequestState::Processing | HTTPRequestState::Processed | HTTPRequestState::Error => return Ok(()),
+            _ => {},
+        }
+
+        let mut interest=Ready::hup() | Ready::error();
+
+        match self.state {
+            HTTPRequestState::WritingRequest => interest.insert(Ready::writable()),
+            HTTPRequestState::ReadingHeader | HTTPRequestState::ReadingBody => interest.insert(Ready::readable()),
+            _ => {},
+        }
+
         poll.reregister(
             &self.socket,
             self.token,
-            Ready::all(),//self.interest,
+            interest,
             PollOpt::edge() | PollOpt::oneshot()
         ).or_else(|e|
-            Err("Can not reregister connection")
+            Err("Can not reregister HTTP Request")
         )
     }
 

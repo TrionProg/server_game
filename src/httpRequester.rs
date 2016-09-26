@@ -1,3 +1,5 @@
+
+
 use std::thread;
 use std::thread::JoinHandle;
 use std::sync::{Mutex,Arc,RwLock,Weak};
@@ -19,8 +21,17 @@ use std::collections::VecDeque;
 use appData::AppData;
 
 const  REQUESTS_LIMIT: usize = 256;
-const  REQUEST_SEND_LENGTH: usize = 16;
+const  REQUEST_SEND_LENGTH: usize = 256;
 const  KEEP_ALIVE_TIMEOUT: i64 = 5;
+
+/*
+pub trait Handler: FnMut(usize, &[u8]) -> () + Send + Sync + 'static {
+    FnMut(usize, &[u8])
+    /// Produce a `Response` from a Request, with the possibility of error.
+    //fn handle(&self, usize, &[u8]) -> ();
+}
+*/
+//type ProcessCallback = FnMut(usize, &[u8]) -> () + Send + Sync + 'static;
 
 #[derive(PartialEq, Eq, Copy, Clone)]
 pub enum HTTPRequesterState{
@@ -54,7 +65,7 @@ struct HTTPRequest{
     responseCode:usize,
     contentLength:usize,
 
-    //onProcess:FnOnce(usize, &[u8]) -> (),
+    processCallback:Box<FnMut(usize, &[u8]) -> () + Send + Sync + 'static>,
 }
 
 pub struct HTTPRequester{
@@ -63,7 +74,7 @@ pub struct HTTPRequester{
 
     threadJoinHandle:Mutex<Option<JoinHandle<()>>>,
 
-    addRequests:Mutex<VecDeque<(String, Vec<u8>, usize)>>,
+    addRequests:Mutex<VecDeque<(String, Vec<u8>, usize, Box<FnMut(usize, &[u8]) -> () + Send + Sync + 'static>)>>,
 }
 
 struct HTTPRequesterCore{
@@ -144,8 +155,8 @@ impl HTTPRequester{
         //теперь вызовется drop для requester
     }
 
-    pub fn addRequest(&self, address:String, request:Vec<u8>, timeout:usize) {
-        self.addRequests.lock().unwrap().push_front( (address,request,timeout) );
+    pub fn addRequest<PC:FnMut(usize, &[u8]) -> () + Send + Sync + 'static>(&self, address:String, request:Vec<u8>, timeout:usize, processCallback:PC) {
+        self.addRequests.lock().unwrap().push_front( (address, request, timeout, Box::new(processCallback) ) );
     }
 }
 
@@ -191,7 +202,6 @@ impl HTTPRequesterCore{
 
         //Write request
         if event.is_writable() {
-            println!("write");
             match self.requests[token].writeRequest(&mut self.poll) {
                 Ok ( _ ) => {},
                 Err( e ) => self.appData.log.print(format!("[ERROR] HTTP Requester : request {:?} : {}", token, e)),
@@ -200,7 +210,6 @@ impl HTTPRequesterCore{
 
         //Read response
         if event.is_readable() {
-            println!("read");
             match self.requests[token].readResponse(&mut self.poll) {
                 Ok ( _ ) => {},
                 Err( e ) => self.appData.log.print(format!("[ERROR] HTTP Requester : request {:?} : {}", token, e)),
@@ -244,7 +253,7 @@ impl HTTPRequesterCore{
 
         let mut addRequestsGuard=self.requester.addRequests.lock().unwrap();
 
-        for (address, request, timeout) in (*addRequestsGuard).pop_back() {
+        for (address, request, timeout, processCallback) in (*addRequestsGuard).pop_back() {
             let mut vacantRequestIndex=None;
 
             for (index, &( ref reqAddress, ref reqToken )) in vacantRequests.iter().enumerate(){
@@ -258,7 +267,7 @@ impl HTTPRequesterCore{
                 Some(index) => {
                     let reqToken=vacantRequests[index].1;
 
-                    match self.requests[reqToken].nextRequest( &mut self.poll, address, request, timeout ){
+                    match self.requests[reqToken].nextRequest( &mut self.poll, address, request, timeout, processCallback ){
                         Ok ( _ ) => {},
                         Err( e ) => self.appData.log.print( format!("[ERROR] HTTPRequester: Failed to use keep alive request {:?} : {}", reqToken, e) ),
                     }
@@ -268,7 +277,7 @@ impl HTTPRequesterCore{
                 None => {
                     let token=match self.requests.vacant_entry() {
                         Some(entry) => {
-                            match HTTPRequest::new(entry.index(), address, request, timeout){
+                            match HTTPRequest::new(entry.index(), address, request, timeout, processCallback ){
                                 Ok (httpRequest) => entry.insert( httpRequest ).index(),
                                 Err(e) => {
                                     self.appData.log.print( format!("[ERROR] HTTPRequester: {}",e) );
@@ -278,7 +287,7 @@ impl HTTPRequesterCore{
                         },
                         None => {
                             self.appData.log.print( String::from("[WARNING] HTTPRequester: Failed to insert request into slab, I will try later") );
-                            (*addRequestsGuard).push_back((address,request,timeout));
+                            (*addRequestsGuard).push_back((address,request,timeout,processCallback));
                             return;
                         }
                     };
@@ -306,7 +315,7 @@ impl HTTPRequesterCore{
 }
 
 impl HTTPRequest{
-    fn new(token:Token, address:String, request:Vec<u8>, timeout:usize) -> Result<HTTPRequest, String> {
+    fn new(token:Token, address:String, request:Vec<u8>, timeout:usize, processCallback:Box<FnMut(usize, &[u8]) -> () + Send + Sync + 'static> ) -> Result<HTTPRequest, String> {
         let addr = try!((&address).parse::<SocketAddr>().or( Err(format!("Can not determine server address : {}", &address)) ));
         let socket=try!(TcpStream::connect(&addr).or( Err(format!("Can not create tcp socket for address : {}", &address)) ));
 
@@ -323,10 +332,12 @@ impl HTTPRequest{
 
             responseCode:0,
             contentLength:0,
+
+            processCallback:processCallback,
         })
     }
 
-    fn nextRequest(&mut self, poll: &mut Poll, address:String, request:Vec<u8>, timeout:usize) -> Result<(), String> {
+    fn nextRequest(&mut self, poll: &mut Poll, address:String, request:Vec<u8>, timeout:usize, processCallback:Box<FnMut(usize, &[u8]) -> () + Send + Sync + 'static> ) -> Result<(), String> {
         let addr = try!((&address).parse::<SocketAddr>().or( Err(format!("Can not determine server address : {}", &address)) ));
         let socket=try!(TcpStream::connect(&addr).or( Err(format!("Can not create tcp socket for address : {}", &address)) ));
 
@@ -338,6 +349,8 @@ impl HTTPRequest{
         self.cursor=0;
         self.responseCode=0;
         self.contentLength=0;
+
+        self.processCallback=processCallback;
 
         match self.reregister(poll) {
             Ok ( _ ) => Ok(()),
@@ -387,7 +400,13 @@ impl HTTPRequest{
 
         loop{
             match self.socket.read(&mut buf) {
-                Ok ( n ) => {self.buffer.extend_from_slice(&buf[0..n]) },
+                Ok ( n ) => {
+                    if n==0 {
+                        break;
+                    }
+
+                    self.buffer.extend_from_slice(&buf[0..n])
+                },
                 Err( e ) => {
                     if e.kind() != ErrorKind::WouldBlock { // Try to read message on next event
                         self.state=HTTPRequestState::Error;
@@ -452,7 +471,7 @@ impl HTTPRequest{
 
         match self.state {
             HTTPRequestState::Processing => {
-                println!("Processing {} {} {} {}",self.responseCode, self.begin, self.cursor, self.buffer.len() );
+                (self.processCallback)( self.responseCode, &self.buffer[self.begin..self.cursor] );
 
                 self.state=HTTPRequestState::Processed;
                 self.timeout=get_time().sec+KEEP_ALIVE_TIMEOUT;

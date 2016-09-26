@@ -1,0 +1,86 @@
+//#![feature(fnbox)]
+//#![feature(fn_traits)]
+
+//use std::boxed::FnBox;
+//use std::collections::HashMap;
+/*
+fn make_map() -> HashMap<i32, Box<FnBox() -> i32>> {
+    let mut map: HashMap<i32, Box<FnBox() -> i32>> = HashMap::new();
+    map.insert(1, Box::new(|| 22));
+    map.insert(2, Box::new(|| 44));
+    map
+}
+*/
+
+
+/*
+
+//works
+struct S{
+    f:fn(usize)
+}
+
+impl S{
+    pub fn call(&self){
+        (self.f)(7);
+    }
+}
+
+
+
+fn main() {
+    fn dd(a:usize) {
+        println!("{}",a);
+    }
+
+    fn dd2(a:usize) {
+        println!("lol{}",a);
+    }
+
+    let mut s=S{f:dd};
+    s.f=dd2;
+    s.call();
+}
+*/
+
+/*
+//works
+struct S{
+    f:Box<FnMut(usize)>,
+}
+
+impl S{
+    fn call(&mut self){
+        let a:usize=43;
+        self.f.call_mut((a,));
+    }
+}
+
+fn main(){
+    let mut s=S{
+        f:Box::new(|a| println!("{}",a) ),
+    };
+
+    s.call();
+}
+*/
+
+//works
+struct S{
+    f:Box<FnMut(usize)>,
+}
+
+impl S{
+    fn call(&mut self){
+        let a:usize=43;
+        (self.f)(a);
+    }
+}
+
+fn main(){
+    let mut s=S{
+        f:Box::new(|a| println!("{}",a) ),
+    };
+
+    s.call();
+}

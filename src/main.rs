@@ -182,25 +182,45 @@ fn main() {
         }
     }
 
+    /*
     appData.getHTTPRequesterAnd(|httpRequester| httpRequester.addRequest(
         String::from("5.255.255.70:80"),
         String::from("GET / HTTP/1.1\r\nHost: yandex.ru\r\n\r\n").into_bytes(),
-        10
+        10,
+        move |responseCode:usize, buffer:&[u8] | {
+            let string=&String::from_utf8_lossy(buffer);
+
+            println!("{}",string);
+        }
+        //move |r: &mut Request|
     ));
+    */
 
     appData.getHTTPRequesterAnd(|httpRequester| httpRequester.addRequest(
-        String::from("5.255.255.70:80"),
-        String::from("GET / HTTP/1.1\r\nHost: https://yandex.ru\r\n\r\n").into_bytes(),
-        10
+        String::from("72.8.141.90:80"),
+        String::from("GET / HTTP/1.1\r\nHost: http://www.rust-lang.org/\r\n\r\n").into_bytes(),
+        10,
+        move |responseCode:usize, buffer:&[u8] | {
+            let string=&String::from_utf8_lossy(buffer);
+
+            println!("{}",string);
+        }
     ));
 
     thread::sleep_ms(3000);
 
+    /*
     appData.getHTTPRequesterAnd(|httpRequester| httpRequester.addRequest(
         String::from("5.255.255.70:80"),
         String::from("GET / HTTP/1.1\r\nHost: https://yandex.ru\r\n\r\n").into_bytes(),
-        10
+        10,
+        move |responseCode:usize, buffer:&[u8] | {
+            let string=&String::from_utf8_lossy(buffer);
+
+            println!("{}",string);
+        }
     ));
+    */
 
     thread::sleep_ms(10000);
 

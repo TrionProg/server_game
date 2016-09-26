@@ -196,6 +196,8 @@ fn main() {
     ));
     */
 
+    /*
+
     appData.getHTTPRequesterAnd(|httpRequester| httpRequester.addRequest(
         String::from("72.8.141.90:80"),
         String::from("GET / HTTP/1.1\r\nHost: http://www.rust-lang.org/\r\n\r\n").into_bytes(),
@@ -208,6 +210,8 @@ fn main() {
     ));
 
     thread::sleep_ms(3000);
+
+    */
 
     /*
     appData.getHTTPRequesterAnd(|httpRequester| httpRequester.addRequest(

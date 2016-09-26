@@ -17,7 +17,7 @@ use appData::AppData;
 use server::{Server,DisconnectionReason,DisconnectionSource};
 use server::ServerState;
 
-use tcpConnection::TCPConnection;
+use tcpConnection::{TCPConnection, ReadResult};
 
 const  ACTIVITY_CONNECTION_LOST_DELAY: i64 = 10;
 const  ACTIVITY_DISCONNECT_DELAY: i64 = 2;
@@ -76,8 +76,9 @@ impl TCPServer{
     fn reregisterConnections(&mut self){
         let connectionsGuard=self.server.tcpConnections.read().unwrap();
 
-        for connection in (*connectionsGuard).iter() {
-            connection.reregister(&mut self.poll).unwrap_or_else(|e| { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e)); });
+        for connectionMutex in (*connectionsGuard).iter() {
+            let mut connection=connectionMutex.lock().unwrap();
+            (*connection).reregister(&mut self.poll).unwrap_or_else(|e| { (*connection).disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e)); });
         }
     }
 
@@ -98,12 +99,13 @@ impl TCPServer{
         {
             let tcpConnectionsGuard=self.server.tcpConnections.read().unwrap();
 
-            for connection in (*tcpConnectionsGuard).iter() {
-                let removeConnection=connection.check();
+            for connectionMutex in (*tcpConnectionsGuard).iter() {
+                let mut connection=connectionMutex.lock().unwrap();
+                let removeConnection=(*connection).check();
 
-                if connection.shouldReset() {
-                    removeConnections.push(connection.token);
-                    connection.deregister(&mut self.poll);
+                if (*connection).shouldReset() {
+                    removeConnections.push((*connection).token);
+                    (*connection).deregister(&mut self.poll);
                 }
             }
         }
@@ -138,8 +140,11 @@ impl TCPServer{
         if event.is_writable() {
             println!("write!!");
             self.server.getTCPConnectionAnd(token, |connection| {
-                if !connection.shouldReset() { //isActive пропускается, чтобы отправить прощальное сообщение
-                    connection.writeMessages().unwrap_or_else(|e| { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e) ); });
+                if !connection.shouldReset() {
+                    match connection.writeMessages(){
+                        Ok ( _ ) => connection.shouldReregister=true,
+                        Err( e ) => connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e) ),
+                    }
                 }
             });
         }
@@ -149,31 +154,36 @@ impl TCPServer{
             if self.token == token {    //accept new connection
                 self.processAccept();
             } else {     //process read event for connection[token]
-                println!("read!!");
-                let buffer=&mut self.buffer;
+                let connectionsGuard=self.server.tcpConnections.write().unwrap();
 
-                let packetResult=self.server.getTCPConnectionAnd(token, |connection| {
+                let readResult={
+                    let mut connection=(*connectionsGuard)[token].lock().unwrap();
+
                     if connection.isActive() {
-                        match connection.readMessage(buffer){
-                            Ok ( playerID ) => Ok(playerID),
-                            Err( e ) => { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e) ); Err(()) },//.unwrap_or_else(|e| { connection.onError(); /*return*/});
-                        }
-                    }else{
-                        Err(())
-                    }
-                });
+                        let readResult=connection.readMessage();
 
-                match packetResult{
-                    Ok ( None ) => {
-                        self.server.getTCPConnectionAnd(token, |connection| {
-                            use packet::ServerToClientTCPPacket;
-                            connection.sendMessage( ServerToClientTCPPacket::Disconnect{ reason:String::from("LOL") }.pack() );
-                        });
+                        match readResult{
+                            ReadResult::Error( e ) =>
+                                connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e) ),
+                            _=>
+                                connection.shouldReregister=true,
+                        }
+
+                        readResult
+                    }else{
+                        ReadResult::Error("connection is not actime")
+                    }
+                };
+
+                match readResult{
+                    ReadResult::Ready( playerID, buffer ) => {
+                        let bufferGuard=buffer.lock().unwrap();
+
+                        //let bufCopy=(*bufferGuard).clone();
+                        //println!("ready!! {}",String::from_utf8(bufCopy).unwrap() );
+                        println!("ready!!");
                     },
-                    Ok ( Some(playerID) ) => {
-                        //get player and...
-                    },
-                    Err( _ ) => {},
+                    _=>{},
                 }
             }
         }
@@ -196,7 +206,7 @@ impl TCPServer{
 
             let token=match (*connectionsGuard).vacant_entry() {
                 Some(entry) => {
-                    let connection = TCPConnection::new(socket, entry.index(), self.server.clone());
+                    let connection = Mutex::new( TCPConnection::new(socket, entry.index(), self.server.clone()) );
                     entry.insert(connection).index()
                 },
                 None => {
@@ -205,12 +215,16 @@ impl TCPServer{
                 }
             };
 
-            match (*connectionsGuard)[token].register(&mut self.poll) {
-                Ok(_) => {},
+            let registerFail=match (*connectionsGuard)[token].lock().unwrap().register(&mut self.poll) {
+                Ok(_) => false,
                 Err(e) => {
                     self.appData.log.print( format!("[ERROR] Server: Failed to register tcp conenction {:?} with poll : {:?}", token, e) );
-                    (*connectionsGuard).remove(token);
+                    true
                 }
+            };
+
+            if registerFail {
+                (*connectionsGuard).remove(token);
             }
         }
     }
@@ -231,7 +245,9 @@ impl TCPServer{
         {
             let mut tcpConnectionsGuard=self.server.tcpConnections.write().unwrap();
 
-            for connection in (*tcpConnectionsGuard).iter() {
+            for connectionMutex in (*tcpConnectionsGuard).iter() {
+                let mut connection=connectionMutex.lock().unwrap();
+
                 if connection.isActive() {
                     connection.disconnect(DisconnectionReason::ServerShutdown);
                     connection.reregister(&mut self.poll);
@@ -257,8 +273,10 @@ impl TCPServer{
         {
             let mut tcpConnectionsGuard=self.server.tcpConnections.write().unwrap();
 
-            for connection in (*tcpConnectionsGuard).iter() {
-                connection.deregister(&mut self.poll);
+            for connectionMutex in (*tcpConnectionsGuard).iter() {
+                let mut connection=connectionMutex.lock().unwrap();
+
+                (*connection).deregister(&mut self.poll);
             }
 
             (*tcpConnectionsGuard).clear();

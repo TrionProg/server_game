@@ -88,7 +88,7 @@ pub struct Server{
     pub tcpServerJoinHandle:Mutex<Option<JoinHandle<()>>>,
     pub udpServerJoinHandle:Mutex<Option<JoinHandle<()>>>,
 
-    pub tcpConnections: RwLock<Slab< TCPConnection , Token>>,
+    pub tcpConnections: RwLock<Slab< Mutex<TCPConnection> , Token>>,
     //udpConnections: RwLock<Slab< UDPConnection , u32>>,
     pub players: RwLock<Slab< Player , usize>>,
 }
@@ -205,10 +205,12 @@ impl Server{
         //теперь вызовется drop для server
     }
 
-    pub fn getTCPConnectionAnd<T,F>(&self, token:Token, f:F) -> T where F:FnOnce(&TCPConnection) -> T {
+    pub fn getTCPConnectionAnd<T,F>(&self, token:Token, mut f:F) -> T where F:FnMut(&mut TCPConnection) -> T {
         let tcpConnectionsGuard=self.tcpConnections.read().unwrap();
 
-        f(& (*tcpConnectionsGuard)[token])
+        let mut connection=(*tcpConnectionsGuard)[token].lock().unwrap();
+
+        f( &mut (*connection) )
     }
 
     /*

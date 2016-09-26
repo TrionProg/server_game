@@ -1,0 +1,15 @@
+[LOG]
+[INFO] Server configurations are loaded
+[INFO] Initializing Storage
+[INFO] Storage has been initialized successfully
+[INFO] Initializing HTTP Requester
+[INFO] HTTP Requester has been initialized
+[INFO] Starting TCP and UDP servers
+[INFO] TCP server is ready
+[INFO] Server has been started
+[INFO] Stoping the server
+[INFO] TCP server has been stoped
+[INFO] Destroying HTTP Requester
+[INFO] HTTP Requester has been destroyed
+[INFO] Destroying storage
+[INFO] Storage has been destroyed

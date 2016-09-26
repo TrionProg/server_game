@@ -33,150 +33,175 @@ ConnectionLost(detected by UDP)
     помечаем shouldReset, не отправляем сообщение
 Kick
     помечаем isActive=false, отправляем сообщение
+
+
+read может возвратить лишь часть буфера, причем в реальной сети его рубят на куски, поэтому надо юзать отдельный буфер для каждого клиента
+take позволяет ограничить кол-во читаемых байт
 */
 
 const STATE_WAITSESSIONID_TIMEOUT: i64 = 10;
 const STATE_LOGIN_OR_REGISTER_TIMEOUT: i64 = 10;
 const STATE_LOGIN_OR_REGISTER_ATTEMPTS_LIMIT: usize = 3;
 
+const MESSAGE_LIMIT_NOT_LOGINED: usize = 16*1024;//256;
+const MESSAGE_LIMIT_LOGINED: usize = 16*1024;
+
 enum TCPConnectionState{
     WaitSessionID(i64),
     LoadingPlayerDataFromMasterServer(i64),
     LoginOrRegister(i64, usize),
     CreatingUDPConnection(i64),
-    PlayerIsReady,
+    Logined,
 }
 
-
+enum ReadingState{
+    ReadingLength ([u8;4]),
+    ReadingMessage (usize),
+}
 
 pub struct TCPConnection{
     pub token: Token,
     server: Arc<Server>,
-    shouldReset: Mutex<bool>,
-    isActive:RwLock<bool>,
-    shouldReregister:Mutex<bool>,
-    playerID:RwLock<Option<u16>>,
+    shouldReset: bool,
+    isActive:bool,
+    pub shouldReregister:bool,
+    playerID:Option<u16>,
 
-    socket: Mutex<TcpStream>,
-    sendQueue: Mutex< VecDeque<Vec<u8>> >,
-    readContinuation:Mutex<Option<u32>>,
+    socket: TcpStream,
 
-    state:Mutex<TCPConnectionState>,
-    //pub timeoutBegin:Mutex<Option<Timespec>>, //вообще для тцп он не нужен(не нужно подтверждать соединение), только для прощального пакета
+    sendQueue: VecDeque<Vec<u8>>,
+
+    needsToRead:usize,
+    readingState:ReadingState,
+    buffer:Arc<Mutex<Vec<u8>>>,
+
+    state:TCPConnectionState,
 }
 
+pub enum ReadResult{
+    NotReady,
+    Ready( Option<u16>, Arc<Mutex<Vec<u8>>> ),
+    Error( &'static str ),
+}
 
 impl TCPConnection{
     pub fn new(socket: TcpStream, token: Token, server:Arc<Server>) -> TCPConnection {
         TCPConnection {
             token: token,
             server: server,
-            shouldReset: Mutex::new(false),
-            isActive:RwLock::new(true),
-            shouldReregister:Mutex::new(false),
-            playerID:RwLock::new(None),
+            shouldReset: false,
+            isActive:true,
+            shouldReregister:false,
+            playerID:None,
 
-            socket: Mutex::new(socket),
-            sendQueue: Mutex::new( VecDeque::with_capacity(32) ),
-            readContinuation: Mutex::new(None),
+            socket: socket,
 
-            state:Mutex::new( TCPConnectionState::WaitSessionID( get_time().sec+STATE_WAITSESSIONID_TIMEOUT ) ),
+            sendQueue: VecDeque::with_capacity(32),
+
+            needsToRead:4,
+            readingState:ReadingState::ReadingLength([0;4]),
+            buffer:Arc::new(Mutex::new(Vec::with_capacity(1024))),
+
+            state:TCPConnectionState::WaitSessionID( get_time().sec+STATE_WAITSESSIONID_TIMEOUT ),
         }
     }
 
-    pub fn readMessage(&self, buffer:&mut Vec<u8>) -> Result<Option<u16>, &'static str> {
-        *self.shouldReregister.lock().unwrap()=true;
+    pub fn readMessage(&mut self) -> ReadResult {
+        let sockRef = <TcpStream as Read>::by_ref(&mut self.socket);
 
-        let messageLength = match try!(self.readMessageLength()) {
-            Some(ml) => ml,
-            None => { return Ok(None); },
-        };
+        match self.readingState{
+            ReadingState::ReadingLength(mut buffer) => {
+                let mut needsToRead=self.needsToRead;
 
-        if messageLength == 0 {
-            return Ok(None);
-        }
+                match sockRef.take(needsToRead as u64).read(&mut buffer[4-needsToRead..needsToRead]) {
+                    Ok(n) => {
+                        needsToRead-=n;
 
-        if messageLength > 16*1024 {
-            return Err("Too much length of message max is 16 kbytes");
-        }
+                        if needsToRead==0 {
+                            let messageLength = BigEndian::read_u32(buffer.as_ref()) as usize;
 
-        unsafe { buffer.set_len(messageLength as usize); }
+                            match self.state {
+                                TCPConnectionState::Logined => {
+                                    if messageLength>MESSAGE_LIMIT_LOGINED {
+                                        return ReadResult::Error("Message length is too large");
+                                    }
+                                },
+                                _=>{
+                                    if messageLength>MESSAGE_LIMIT_NOT_LOGINED {
+                                        return ReadResult::Error("Message length is too large");
+                                    }
+                                },
+                            }
 
-        let mut socketGuard=self.socket.lock().unwrap();
-        let sockRef = <TcpStream as Read>::by_ref(&mut *socketGuard);
+                            self.readingState=ReadingState::ReadingMessage(messageLength);
+                            self.needsToRead=messageLength;
+                            //self.buffer.lock().unwrap().clear();
+                            unsafe { self.buffer.lock().unwrap().set_len(messageLength); }
+                        }else{
+                            self.readingState=ReadingState::ReadingLength(buffer);
+                            self.needsToRead=needsToRead;
 
-        match sockRef.take(messageLength as u64).read(buffer) {
-            Ok(n) => {
-                if n < messageLength as usize {
-                    return Err("Did not read enough bytes");
+                            return ReadResult::NotReady; // Try to read message length on next event
+                        }
+                    },
+                    Err(e) => {
+                        if e.kind() == ErrorKind::WouldBlock { // Try to read message length on next event
+                            return ReadResult::NotReady;
+                        } else {
+                            return ReadResult::Error("read message length error")
+                        }
+                    }
                 }
-
-                *self.readContinuation.lock().unwrap() = None;
-
-                Ok(*self.playerID.read().unwrap())
             },
-            Err(e) => {
-                if e.kind() == ErrorKind::WouldBlock { // Try to read message on next event
-                    println!("continue");
-                    *self.readContinuation.lock().unwrap() = Some(messageLength);
-                    Ok(None)
-                } else {
-                    Err("read message error")
+            _=>{},
+        }
+
+        match self.readingState{
+            ReadingState::ReadingMessage(messageLength) => {
+                let mut needsToRead=self.needsToRead;
+
+                let mut bufferGuard=self.buffer.lock().unwrap();
+
+                match sockRef.take(needsToRead as u64).read(&mut (*bufferGuard)[messageLength-needsToRead..messageLength]) {
+                    Ok(n) => {
+                        println!("got:{} = {}/{}",n,messageLength-needsToRead+n,messageLength);
+
+                        needsToRead-=n;
+
+                        if needsToRead==0 {
+                            self.readingState=ReadingState::ReadingLength([0;4]);
+                            self.needsToRead=4;
+
+                            ReadResult::Ready( self.playerID, self.buffer.clone() )
+                        }else{
+                            self.needsToRead=needsToRead;
+
+                            ReadResult::NotReady
+                        }
+                    },
+                    Err(e) => {
+                        if e.kind() == ErrorKind::WouldBlock { // Try to read message on next event
+                            ReadResult::NotReady
+                        } else {
+                            ReadResult::Error("read message length error")
+                        }
+                    }
                 }
-            }
+            },
+            _=>ReadResult::NotReady,
         }
     }
 
-
-    fn readMessageLength(&self) -> Result<Option<u32>, &'static str> {
-        {
-            let readContinuationGuard=self.readContinuation.lock().unwrap();
-
-            match *readContinuationGuard {
-                Some(messageLength)  => return Ok(Some(messageLength)),
-                None => {},
-            }
-        }
-
-        let mut socketGuard=self.socket.lock().unwrap();
-
-        let mut buf=[0u8;4];
-
-        //а он не может случайно прочесть 3 байта?!
-        let bytes = match (*socketGuard).read(&mut buf) {
-            Ok(n) => n,
-            Err(e) => {
-                if e.kind() == ErrorKind::WouldBlock {
-                    return Ok(None);
-                } else {
-                    return Err("Read message length error");
-                }
-            }
-        };
-
-        if bytes!=4 {
-            return Err("Invalid message length");
-        }
-
-        let messageLength = BigEndian::read_u32(buf.as_ref());
-        Ok(Some(messageLength))
-    }
-
-    pub fn writeMessages(&self) -> Result<(), &'static str> {
-        *self.shouldReregister.lock().unwrap()=true;
-
-        let mut sendQueueGuard=self.sendQueue.lock().unwrap();
-        let mut socketGuard=self.socket.lock().unwrap();
-
-        while sendQueueGuard.len()>0 {
-            let message=(*sendQueueGuard).pop_back().unwrap();
+    pub fn writeMessages(&mut self) -> Result<(), &'static str> {
+        while self.sendQueue.len()>0 {
+            let message=self.sendQueue.pop_back().unwrap();
 
             let length=message.len();
-            match (*socketGuard).write(&message[..]) {
+            match self.socket.write(&message[..]) {
                 Ok(n) => {},
                 Err(e) => {
                     if e.kind() == ErrorKind::WouldBlock {
-                        (*sendQueueGuard).push_back(message);
+                        self.sendQueue.push_back(message);
 
                         break;
                     } else {
@@ -189,19 +214,19 @@ impl TCPConnection{
         Ok(())
     }
 
-    pub fn sendMessage(&self, msg:Vec<u8>){
+    pub fn sendMessage(&mut self, msg:Vec<u8>){
         println!("send: {}",msg.len());
 
-        self.sendQueue.lock().unwrap().push_front(msg);
+        self.sendQueue.push_front(msg);
 
-        *self.shouldReregister.lock().unwrap()=true;
+        self.shouldReregister=true;
     }
 
-    pub fn register(&self, poll: &mut Poll) -> Result<(), &'static str> {
+    pub fn register(&mut self, poll: &mut Poll) -> Result<(), &'static str> {
         let interest=Ready::hup() | Ready::error() | Ready::readable();
 
         poll.register(
-            &(*self.socket.lock().unwrap()),
+            &self.socket,
             self.token,
             interest,
             PollOpt::edge() | PollOpt::oneshot()
@@ -211,25 +236,28 @@ impl TCPConnection{
     }
 
     /// Re-register interest in read events with poll.
-    pub fn reregister(&self, poll: &mut Poll) -> Result<(), &'static str> {
-        if !{*self.shouldReregister.lock().unwrap()} {
+    pub fn reregister(&mut self, poll: &mut Poll) -> Result<(), &'static str> {
+        if !self.shouldReregister || self.shouldReset {
             return Ok(());
         }
 
-        *self.shouldReregister.lock().unwrap()=false;
+        self.shouldReregister=false;
 
         let mut interest=Ready::hup() | Ready::error();
 
         if self.isActive() {
             interest.insert(Ready::readable());
+        }else if self.sendQueue.len()==0 { //и отправили прощальное сообщение
+            self.shouldReset=true;
+            return Ok(());
         }
 
-        if (*self.sendQueue.lock().unwrap()).len()>0 {
+        if self.sendQueue.len()>0 {
             interest.insert(Ready::writable());
         }
 
         poll.reregister(
-            &(*self.socket.lock().unwrap()),
+            &self.socket,
             self.token,
             interest,
             PollOpt::edge() | PollOpt::oneshot()
@@ -239,20 +267,19 @@ impl TCPConnection{
     }
 
     pub fn isActive(&self) -> bool{
-        *self.isActive.read().unwrap()
+        self.isActive
     }
 
     pub fn shouldReset(&self) -> bool {
-        *self.shouldReset.lock().unwrap()
+        self.shouldReset
     }
 
-    pub fn check(&self){
+    pub fn check(&mut self){
         if self.shouldReset() {
             return ;
         }
 
-        let mut stateGuard=self.state.lock().unwrap();
-        match *stateGuard {
+        match self.state {
             TCPConnectionState::WaitSessionID( timeout ) => {
                 if get_time().sec>=timeout {
                     self.disconnect( DisconnectionReason::Kick( DisconnectionSource::TCP, String::from("Expectation Session ID timeout")) );
@@ -261,7 +288,7 @@ impl TCPConnection{
             TCPConnectionState::LoadingPlayerDataFromMasterServer( timeout ) => {
                 if get_time().sec>=timeout {//не удалось подключиться к главному серверу - предложим зарегаться или залогиниться
                     //send message
-                    (*stateGuard)=TCPConnectionState::LoginOrRegister( get_time().sec + STATE_LOGIN_OR_REGISTER_TIMEOUT, 0 );
+                    self.state=TCPConnectionState::LoginOrRegister( get_time().sec + STATE_LOGIN_OR_REGISTER_TIMEOUT, 0 );
                 }
             },
             TCPConnectionState::LoginOrRegister( timeout, attemptsNumber ) => {
@@ -274,7 +301,7 @@ impl TCPConnection{
                     self.disconnect( DisconnectionReason::Kick( DisconnectionSource::TCP, String::from("Expectation UDP Connection timeout")) );
                 }
             }
-            TCPConnectionState::PlayerIsReady => {},
+            TCPConnectionState::Logined => {},
         }
 
     }
@@ -295,17 +322,17 @@ impl TCPConnection{
 
     */
 
-    pub fn disconnect(&self, reason:DisconnectionReason){
-        println!("disconnect");
-        let mut playerGuard=self.playerID.write().unwrap();
+    pub fn disconnect(&mut self, reason:DisconnectionReason){
+        println!("disconnect!");
 
         match reason{
             DisconnectionReason::Error( ref source, ref msg ) => {
+                println!("{}",msg);
                 match *source{
                     DisconnectionSource::TCP => {
-                        *self.shouldReset.lock().unwrap()=true;
+                        self.shouldReset=true;
 
-                        match *playerGuard {
+                        match self.playerID {
                             Some( playerID ) =>
                                 self.server.getPlayerAnd(playerID, | player | player.disconnect(reason.clone())),
                             None => {},
@@ -317,10 +344,10 @@ impl TCPConnection{
                 }
             },
             DisconnectionReason::ConnectionLost( ref source ) => {
-                *self.shouldReset.lock().unwrap()=true;
+                self.shouldReset=true;
                 match *source{
                     DisconnectionSource::TCP => {
-                        match *playerGuard {
+                        match self.playerID {
                             Some( playerID ) =>
                                 self.server.getPlayerAnd(playerID, | player | player.disconnect(reason.clone())),
                             None => {},
@@ -332,7 +359,7 @@ impl TCPConnection{
             DisconnectionReason::Kick( ref source, ref message ) => {//только от игрока??
                 match *source{
                     DisconnectionSource::TCP => {
-                        match *playerGuard {
+                        match self.playerID {
                             Some( playerID ) =>
                                 self.server.getPlayerAnd(playerID, | player | player.disconnect(reason.clone())),
                             None => {},
@@ -344,7 +371,7 @@ impl TCPConnection{
                 self.sendMessage( ServerToClientTCPPacket::Disconnect{ reason:message.clone() }.pack() );
             },
             DisconnectionReason::ServerShutdown => {
-                match *playerGuard {
+                match self.playerID {
                     Some( playerID ) =>
                         self.server.getPlayerAnd(playerID, | player | player.disconnect(reason.clone())),
                     None => {},
@@ -353,11 +380,11 @@ impl TCPConnection{
                 self.sendMessage( ServerToClientTCPPacket::Disconnect{ reason:String::from("Server shutdown") }.pack() );
             },
             DisconnectionReason::Hup( ref source ) => {
-                *self.shouldReset.lock().unwrap()=true;
+                self.shouldReset=true;
 
                 match *source{
                     DisconnectionSource::TCP => {
-                        match *playerGuard {
+                        match self.playerID {
                             Some( playerID ) =>
                                 self.server.getPlayerAnd(playerID, | player | player.disconnect(reason.clone())),
                             None => {},
@@ -368,13 +395,13 @@ impl TCPConnection{
             },
         }
 
-        *self.isActive.write().unwrap()=false;
-        *playerGuard=None;
+        self.isActive=false;
+        self.playerID=None;
     }
 
-    pub fn deregister(&self, poll: &mut Poll) {
+    pub fn deregister(&mut self, poll: &mut Poll) {
         poll.deregister(
-            &(*self.socket.lock().unwrap())
+            &self.socket
         );
     }
 }

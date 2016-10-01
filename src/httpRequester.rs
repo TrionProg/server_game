@@ -155,8 +155,8 @@ impl HTTPRequester{
         //теперь вызовется drop для requester
     }
 
-    pub fn addRequest<PC:FnMut(usize, &[u8]) -> () + Send + Sync + 'static>(&self, address:String, request:Vec<u8>, timeout:usize, processCallback:PC) {
-        self.addRequests.lock().unwrap().push_front( (address, request, timeout, Box::new(processCallback) ) );
+    pub fn addRequest<PC:FnMut(usize, &[u8]) -> () + Send + Sync + 'static>(&self, address:&str, request:Vec<u8>, timeout:usize, processCallback:PC) {
+        self.addRequests.lock().unwrap().push_front( (String::from(address), request, timeout, Box::new(processCallback) ) );
     }
 }
 

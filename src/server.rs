@@ -67,11 +67,13 @@ pub enum ServerState{
 
 #[derive(PartialEq, Eq, Clone)]
 pub enum DisconnectionReason{
-    Error (DisconnectionSource, &'static str),
-    ConnectionLost(DisconnectionSource),
-    Kick ( DisconnectionSource, String),
+    Hup,
     ServerShutdown,
-    Hup ( DisconnectionSource ),
+    FatalError ( &'static str  ),
+    ClientDesire ( String ),
+    ServerDesire ( String ),
+    ClientError ( String ),
+    ServerError( &'static str ),
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -127,7 +129,6 @@ impl Server{
             token:Token(10_000_000),
             events:Events::with_capacity(appData.serverConfig.server_connectionsLimit*8),
             checkerCounter:0,
-            buffer:Vec::with_capacity(16*1024),
         };
 
         /*
@@ -182,9 +183,8 @@ impl Server{
     pub fn stop( server:Arc<Server> ){
         if {*server.state.read().unwrap()}==ServerState::Processing {
             server.appData.upgrade().unwrap().log.print( String::from("[INFO] Stoping the server") );
+            *server.state.write().unwrap()=ServerState::Stop;
         }
-
-        *server.state.write().unwrap()=ServerState::Stop;
 
         let appData=server.appData.upgrade().unwrap();
 

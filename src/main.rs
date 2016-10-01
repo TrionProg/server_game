@@ -226,7 +226,7 @@ fn main() {
     ));
     */
 
-    thread::sleep_ms(10000);
+    thread::sleep_ms(20000);
 
     AppData::destroy( appData );
 

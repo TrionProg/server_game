@@ -7,6 +7,7 @@
 [INFO] Starting TCP and UDP servers
 [INFO] TCP server is ready
 [INFO] Server has been started
+[INFO] Disconnecting : server desire : Expectation Session ID timeout
 [INFO] Stoping the server
 [INFO] TCP server has been stoped
 [INFO] Destroying HTTP Requester

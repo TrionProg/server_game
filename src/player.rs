@@ -33,110 +33,53 @@ impl Player{
         }
     }
 
-    pub fn disconnect(&self, reason:DisconnectionReason){
+    pub fn disconnect(&self, source:DisconnectionSource, reason:DisconnectionReason){
+        match reason{
+            DisconnectionReason::Hup =>
+                println!("hup"),
+            DisconnectionReason::ServerShutdown =>
+                println!("server shutdown"),
+            DisconnectionReason::FatalError( ref msg ) =>
+                println!("fatal error {}",msg),
+            DisconnectionReason::ClientDesire( ref msg ) =>
+                println!("client desire {}",msg),
+            DisconnectionReason::ServerDesire( ref msg ) =>
+                println!("server desire {}",msg),
+            DisconnectionReason::ClientError( ref msg ) =>
+                println!("client error {}",msg ),
+            DisconnectionReason::ServerError( ref msg ) =>
+                println!("server error {}",msg ),
+        }
+
         let mut tcpConnectionGuard=self.tcpConnection.write().unwrap();
         //let mut udpConnectionGuard=self.udpConnection.write().unwrap();
 
-        match reason{
-            DisconnectionReason::Error( ref source, ref msg ) => {
-                match *source{
-                    DisconnectionSource::Player => {
-                        match *tcpConnectionGuard {
-                            Some( token ) => self.server.getTCPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
+        match source{
+            DisconnectionSource::TCP => {
+                /*
+                match *udpConnectionGuard {
+                    Some( token ) => self.server.getUDPConnectionAnd(token, | connection | connection.disconnect( source.clone(), reason.clone() )),
+                    None => {},
+                }
+                */
+            },
+            DisconnectionSource::UDP => {
+                match *tcpConnectionGuard {
+                    Some( token ) => self.server.getTCPConnectionAnd(token, | connection | connection.disconnect( source.clone(), reason.clone() )),
+                    None => {},
+                }
+            },
+            DisconnectionSource::Player => {
+                /*
+                match *udpConnectionGuard {
+                    Some( token ) => self.server.getUDPConnectionAnd(token, | connection | connection.disconnect( source.clone(), reason.clone() )),
+                    None => {},
+                }
+                */
 
-                        /*
-                        match *udpConnectionGuard {
-                            Some( token ) => self.server.getUDPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
-                        */
-                    },
-                    DisconnectionSource::TCP => {
-                        /*
-                        match *udpConnectionGuard {
-                            Some( token ) => self.server.getUDPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
-                        */
-                    },
-                    DisconnectionSource::UDP => {
-                        match *tcpConnectionGuard {
-                            Some( token ) => self.server.getTCPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
-                    },
-                }
-            },
-            DisconnectionReason::ConnectionLost( ref source ) => {
-                match *source{
-                    DisconnectionSource::TCP => {
-                        /*
-                        match *udpConnectionGuard {
-                            Some( token ) => self.server.getUDPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
-                        */
-                    },
-                    DisconnectionSource::UDP => {
-                        match *tcpConnectionGuard {
-                            Some( token ) => self.server.getTCPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
-                    },
-                    DisconnectionSource::Player=> {},
-                }
-            },
-            DisconnectionReason::Kick( ref source, ref message ) => {//только от игрока??
-                match *source{
-                    DisconnectionSource::Player => {
-                        match *tcpConnectionGuard {
-                            Some( token ) => self.server.getTCPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
-
-                        /*
-                        match *udpConnectionGuard {
-                            Some( token ) => self.server.getUDPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
-                        */
-                    },
-                    DisconnectionSource::TCP => {
-                        /*
-                        match *udpConnectionGuard {
-                            Some( token ) => self.server.getUDPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
-                        */
-                    },
-                    DisconnectionSource::UDP => {
-                        match *tcpConnectionGuard {
-                            Some( token ) => self.server.getTCPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
-                    },
-                }
-            },
-            DisconnectionReason::ServerShutdown => {},
-            DisconnectionReason::Hup( ref source ) => {
-                match *source{
-                    DisconnectionSource::TCP => {
-                        /*
-                        match *udpConnectionGuard {
-                            Some( token ) => self.server.getUDPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
-                        */
-                    },
-                    DisconnectionSource::UDP => {
-                        match *tcpConnectionGuard {
-                            Some( token ) => self.server.getTCPConnectionAnd(token, | connection | connection.disconnect(reason.clone())),
-                            None => {},
-                        }
-                    },
-                    DisconnectionSource::Player=> {},
+                match *tcpConnectionGuard {
+                    Some( token ) => self.server.getTCPConnectionAnd(token, | connection | connection.disconnect( source.clone(), reason.clone() )),
+                    None => {},
                 }
             },
         }

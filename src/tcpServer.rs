@@ -14,10 +14,12 @@ use time::{get_time};
 use std::time::Duration;
 
 use appData::AppData;
-use server::{Server,DisconnectionReason,DisconnectionSource};
+use server::{Server, DisconnectionReason, DisconnectionSource};
 use server::ServerState;
 
 use tcpConnection::{TCPConnection, ReadResult};
+
+use packet::{ServerToClientTCPPacket, ClientToServerTCPPacket};
 
 const  ACTIVITY_CONNECTION_LOST_DELAY: i64 = 10;
 const  ACTIVITY_DISCONNECT_DELAY: i64 = 2;
@@ -30,8 +32,6 @@ pub struct TCPServer{
     pub token: Token, // token of our server. we keep track of it here instead of doing `const SERVER = Token(0)`.
     pub events: Events, // a list of events to process
     pub checkerCounter: usize,
-
-    pub buffer: Vec<u8>,
 }
 
 impl TCPServer{
@@ -78,7 +78,7 @@ impl TCPServer{
 
         for connectionMutex in (*connectionsGuard).iter() {
             let mut connection=connectionMutex.lock().unwrap();
-            (*connection).reregister(&mut self.poll).unwrap_or_else(|e| { (*connection).disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e)); });
+            (*connection).reregister(&mut self.poll).unwrap_or_else(|e| { (*connection).disconnect(DisconnectionSource::TCP, DisconnectionReason::FatalError(e)); });
         }
     }
 
@@ -103,7 +103,7 @@ impl TCPServer{
                 let mut connection=connectionMutex.lock().unwrap();
                 let removeConnection=(*connection).check();
 
-                if (*connection).shouldReset() {
+                if (*connection).shouldReset {
                     removeConnections.push((*connection).token);
                     (*connection).deregister(&mut self.poll);
                 }
@@ -123,7 +123,11 @@ impl TCPServer{
         //Error with connection has been occured
         if event.is_error() {
             println!("error!!");
-            self.server.getTCPConnectionAnd(token, |connection| { connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, "socket error") ); });
+            self.server.getTCPConnectionAnd(token, |connection| {
+                if connection.isActive {
+                    connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::FatalError("socket error") );
+                }
+            });
 
             return;
         }
@@ -131,7 +135,12 @@ impl TCPServer{
         //Connection has been closed
         if event.is_hup() {
             println!("hup!!");
-            self.server.getTCPConnectionAnd(token, |connection| { connection.disconnect(DisconnectionReason::Hup(DisconnectionSource::TCP)); });
+            self.server.getTCPConnectionAnd(token, |connection| {
+                if connection.isActive {
+                    connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::Hup);
+                }
+            });
+
 
             return;
         }
@@ -140,10 +149,10 @@ impl TCPServer{
         if event.is_writable() {
             println!("write!!");
             self.server.getTCPConnectionAnd(token, |connection| {
-                if !connection.shouldReset() {
+                if !connection.shouldReset {
                     match connection.writeMessages(){
                         Ok ( _ ) => connection.shouldReregister=true,
-                        Err( e ) => connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e) ),
+                        Err( e ) => connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::FatalError(e) ),
                     }
                 }
             });
@@ -154,38 +163,82 @@ impl TCPServer{
             if self.token == token {    //accept new connection
                 self.processAccept();
             } else {     //process read event for connection[token]
-                let connectionsGuard=self.server.tcpConnections.write().unwrap();
-
                 let readResult={
+                    let connectionsGuard=self.server.tcpConnections.read().unwrap();
+
                     let mut connection=(*connectionsGuard)[token].lock().unwrap();
 
-                    if connection.isActive() {
+                    if connection.isActive {
                         let readResult=connection.readMessage();
 
                         match readResult{
                             ReadResult::Error( e ) =>
-                                connection.disconnect(DisconnectionReason::Error(DisconnectionSource::TCP, e) ),
+                                connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::ServerError(e) ),
                             _=>
                                 connection.shouldReregister=true,
                         }
 
-                        readResult
+                        Some(readResult)
                     }else{
-                        ReadResult::Error("connection is not actime")
+                        None
                     }
                 };
 
                 match readResult{
-                    ReadResult::Ready( playerID, buffer ) => {
+                    Some(ReadResult::Ready( playerID, buffer )) => {
                         let bufferGuard=buffer.lock().unwrap();
 
-                        //let bufCopy=(*bufferGuard).clone();
-                        //println!("ready!! {}",String::from_utf8(bufCopy).unwrap() );
-                        println!("ready!!");
+                        match self.processMessage(token, playerID, &(*bufferGuard)) {
+                            Ok ( _ ) => {},
+                            Err( e ) => {
+                                self.server.getTCPConnectionAnd(token, |connection| {
+                                    connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::ServerError(e) )
+                                });
+                            },
+                        }
                     },
                     _=>{},
                 }
             }
+        }
+    }
+
+    fn processMessage(&self, token:Token, playerID:Option<u16>, buffer:&Vec<u8>) -> Result<(), &'static str> {
+        let packet=try!(ClientToServerTCPPacket::unpack(buffer));
+
+        let process=match packet{
+            ClientToServerTCPPacket::ClientDesire( ref msg ) => {
+                self.server.getTCPConnectionAnd(token, |connection| {
+                    connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::ClientDesire(msg.clone()) );
+                });
+
+                false
+            },
+            ClientToServerTCPPacket::ClientError( ref msg ) => {
+                self.server.getTCPConnectionAnd(token, |connection| {
+                    connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::ClientError(msg.clone()) );
+                });
+
+                false
+            },
+            _=>
+                true,
+        };
+
+        if process{
+            match playerID {
+                Some(playerID) => {
+                    //get player and..
+                    Ok(())
+                },
+                None => {
+                    self.server.getTCPConnectionAnd(token, |connection| {
+                        connection.processPacket(&packet)
+                    })
+                },
+            }
+        }else{
+            Ok(())
         }
     }
 
@@ -248,8 +301,8 @@ impl TCPServer{
             for connectionMutex in (*tcpConnectionsGuard).iter() {
                 let mut connection=connectionMutex.lock().unwrap();
 
-                if connection.isActive() {
-                    connection.disconnect(DisconnectionReason::ServerShutdown);
+                if connection.isActive {
+                    connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::ServerShutdown );
                     connection.reregister(&mut self.poll);
                 }
             }
@@ -259,7 +312,6 @@ impl TCPServer{
 
         while waitTimeBegin.sec + ACTIVITY_DISCONNECT_DELAY > get_time().sec {
             let eventsNumber=try!(self.poll.poll(&mut self.events, Some(Duration::new(0,100_000_000)) ).or(Err(String::from("Can not get eventsNumber")) ) );
-            //периодически выходить по таймауту
 
             for i in 0..eventsNumber {
                 let event = try!(self.events.get(i).ok_or(String::from("Can not get event") ) );

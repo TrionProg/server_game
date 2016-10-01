@@ -76,7 +76,7 @@ impl AppData{
             Some( ref httpRequester) => {
                 f( httpRequester )
             },
-            None=>panic!("No web httpRequester"),
+            None=>panic!("No httpRequester"),
         }
     }
 }

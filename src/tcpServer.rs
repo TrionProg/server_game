@@ -172,8 +172,10 @@ impl TCPServer{
                         let readResult=connection.readMessage();
 
                         match readResult{
+                            ReadResult::FatalError( e ) =>
+                                connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::FatalError(e) ),
                             ReadResult::Error( e ) =>
-                                connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::ServerError(e) ),
+                                connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::ServerError( String::from(e) ) ),
                             _=>
                                 connection.shouldReregister=true,
                         }
@@ -192,7 +194,7 @@ impl TCPServer{
                             Ok ( _ ) => {},
                             Err( e ) => {
                                 self.server.getTCPConnectionAnd(token, |connection| {
-                                    connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::ServerError(e) )
+                                    connection.disconnect(DisconnectionSource::TCP, DisconnectionReason::ServerError( e.clone() ) )
                                 });
                             },
                         }
@@ -203,7 +205,7 @@ impl TCPServer{
         }
     }
 
-    fn processMessage(&self, token:Token, playerID:Option<u16>, buffer:&Vec<u8>) -> Result<(), &'static str> {
+    fn processMessage(&self, token:Token, playerID:Option<u16>, buffer:&Vec<u8>) -> Result<(), String> {
         let packet=try!(ClientToServerTCPPacket::unpack(buffer));
 
         let process=match packet{

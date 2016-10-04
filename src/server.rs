@@ -73,7 +73,7 @@ pub enum DisconnectionReason{
     ClientDesire ( String ),
     ServerDesire ( String ),
     ClientError ( String ),
-    ServerError( &'static str ),
+    ServerError( String ),
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -211,6 +211,17 @@ impl Server{
         let mut connection=(*tcpConnectionsGuard)[token].lock().unwrap();
 
         f( &mut (*connection) )
+    }
+
+    pub fn getSafeTCPConnectionAnd<T,F>(&self, token:Token, mut f:F) -> Option<T> where F:FnMut(&mut TCPConnection) -> T {
+        let tcpConnectionsGuard=self.tcpConnections.read().unwrap();
+
+        match (*tcpConnectionsGuard).get(token){
+            Some( connection ) =>
+                Some( f( &mut (*connection).lock().unwrap() ) ),
+            None =>
+                None,
+        }
     }
 
     /*

@@ -17,7 +17,7 @@ use std::sync::{Mutex,RwLock,Arc,Barrier,Weak};
 
 use appData::AppData;
 use version::Version;
-use config;
+use description;
 
 pub struct ModDescription{
     name:String,
@@ -29,7 +29,7 @@ pub struct ModDescription{
 
 impl ModDescription {
     fn read( text:&String ) -> Result<ModDescription, String> {
-        let modDescription: ModDescription = try!(config::parse( text, |root| {
+        let modDescription: ModDescription = try!(description::parse( text, |root| {
             Ok(
                 ModDescription{
                     name:try!(root.getString("name")).clone(),
@@ -262,7 +262,7 @@ fn selectModulesToLoad( appData:&Arc<AppData> ) -> Result< Vec<String>, String >
         Err( e ) => return Err(format!("Can not read file \"{}\" : {}", activeModsFileName, e.description())),
     }
 
-    let mut activateMods:VecDeque< (String, Option<Version>) >=match config::parse( &content, |root| {
+    let mut activateMods:VecDeque< (String, Option<Version>) >=match description::parse( &content, |root| {
         let activeModsList=try!( root.getList("active mods") );
         let mut activateMods:VecDeque< (String, Option<Version>) >=VecDeque::new();
 

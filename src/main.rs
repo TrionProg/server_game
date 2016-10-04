@@ -79,7 +79,8 @@ use std::sync::{Mutex,RwLock,Arc,Barrier,Weak};
 mod log;
 mod appData;
 //mod adminServer;
-mod config;
+mod lexer;
+mod description;
 mod serverConfig;
 mod version;
 mod modLoader;
@@ -184,8 +185,8 @@ fn main() {
 
     /*
     appData.getHTTPRequesterAnd(|httpRequester| httpRequester.addRequest(
-        String::from("5.255.255.70:80"),
-        String::from("GET / HTTP/1.1\r\nHost: yandex.ru\r\n\r\n").into_bytes(),
+        "89.110.48.1:1941",
+        String::from("GET /getUserIDAndName_sessionID=123456789 HTTP/1.1\r\nHost: 89.110.48.1:1941\r\n\r\n").into_bytes(),
         10,
         move |responseCode:usize, buffer:&[u8] | {
             let string=&String::from_utf8_lossy(buffer);

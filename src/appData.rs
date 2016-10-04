@@ -79,4 +79,13 @@ impl AppData{
             None=>panic!("No httpRequester"),
         }
     }
+
+    pub fn getServerAnd<T,F>(&self, f:F) -> T where F:FnOnce(&Server) -> T {
+        match *self.server.read().unwrap(){
+            Some( ref server) => {
+                f( server )
+            },
+            None=>panic!("No server"),
+        }
+    }
 }

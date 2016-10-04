@@ -2,12 +2,15 @@ use bincode::rustc_serialize::{encode_into, decode};
 use bincode::SizeLimit;
 use byteorder::{ByteOrder, BigEndian};
 
+const MESSAGE_TO_SERVER_LIMIT: u64 = 16*1024;
+const MESSAGE_TO_CLIENT_LIMIT: u64 = 64*1024;
+
 #[derive(RustcEncodable, RustcDecodable)]
 pub enum ClientToServerTCPPacket{
     ClientError( String ),
     ClientDesire( String ),
 
-    SessionID{ sessionID:String },
+    SessionID( String ),
 }
 
 impl ClientToServerTCPPacket{
@@ -16,14 +19,14 @@ impl ClientToServerTCPPacket{
             ClientToServerTCPPacket::ClientError( _ ) => 64,
             ClientToServerTCPPacket::ClientDesire( _ ) => 64,
 
-            ClientToServerTCPPacket::SessionID { ref sessionID } => 64,
+            ClientToServerTCPPacket::SessionID ( _ ) => 64,
         };
 
         let mut buffer:Vec<u8>=Vec::with_capacity(bufferLength);
 
         unsafe { buffer.set_len(4); }
 
-        match encode_into(self, &mut buffer, SizeLimit::Bounded(bufferLength as u64 - 4)){
+        match encode_into(self, &mut buffer, SizeLimit::Bounded(MESSAGE_TO_CLIENT_LIMIT) ){
             Ok ( _ ) =>{
                 let packetLength=buffer.len() as u32 - 4;
                 BigEndian::write_u32(&mut buffer[0..4], packetLength);
@@ -55,6 +58,7 @@ pub enum ServerToClientTCPPacket{
     ServerDesire( String ),
 
     LoginOrRegister,
+    InitializeUDPConnection( usize ),
 }
 
 impl ServerToClientTCPPacket{
@@ -65,13 +69,14 @@ impl ServerToClientTCPPacket{
             ServerToClientTCPPacket::ServerDesire( _ ) => 64,
 
             ServerToClientTCPPacket::LoginOrRegister => 16,
+            ServerToClientTCPPacket::InitializeUDPConnection ( _ ) => 16,
         };
 
         let mut buffer:Vec<u8>=Vec::with_capacity(bufferLength);
 
         unsafe { buffer.set_len(4); }
 
-        match encode_into(self, &mut buffer, SizeLimit::Bounded(bufferLength as u64 - 4)){
+        match encode_into(self, &mut buffer, SizeLimit::Bounded(MESSAGE_TO_SERVER_LIMIT) ){
             Ok ( _ ) =>{
                 let packetLength=buffer.len() as u32 - 4;
                 BigEndian::write_u32(&mut buffer[0..4], packetLength);
@@ -83,10 +88,10 @@ impl ServerToClientTCPPacket{
         buffer
     }
 
-    pub fn unpack(message:&Vec<u8>) -> Result<ServerToClientTCPPacket, &'static str>{
+    pub fn unpack(message:&Vec<u8>) -> Result<ServerToClientTCPPacket, String>{
         match decode(&message[..]){
             Ok ( p ) => Ok ( p ),
-            Err( e ) => Err("deserialization error"),
+            Err( e ) => Err( String::from("deserialization error") ),
         }
     }
 }

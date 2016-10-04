@@ -6,7 +6,7 @@ use std::fs::File;
 
 use std::sync::{Mutex,RwLock,Arc,Barrier,Weak};
 
-use config;
+use description;
 
 pub struct ServerConfig{
     pub server_adminPort:u16,
@@ -34,8 +34,7 @@ impl ServerConfig{
             Err( e ) => return Err(format!("Can not read file \"serverConfig.cfg\" : {}", e.description())),
         }
 
-        let serverConfig: ServerConfig = match config::parse( &content, |root| {
-
+        let serverConfig: ServerConfig = match description::parse( &content, |root| {
             Ok(
                 ServerConfig{
                     server_adminPort:try!(root.getStringAs::<u16>("server.adminPort")),
@@ -77,7 +76,7 @@ impl ServerConfig{
             )
         }){
             Ok( sc ) => sc,
-            Err( e ) => return Err(format!("Can not parse file \"serverConfig.cfg\" : {}", e)),
+            Err( e ) => return Err(format!("Can not parse file \"serverConfig.cfg\" : \n{}", e)),
         };
 
         Ok(serverConfig)

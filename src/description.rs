@@ -241,7 +241,7 @@ impl List{
 
 }
 
-pub fn parse<T,F>( text:&String, process:F) -> Result<T, String> where F:FnOnce(Map) -> Result<T, String>{
+pub fn parse<T,F>( text:&str, process:F) -> Result<T, String> where F:FnOnce(Map) -> Result<T, String>{
     let mut cur=Cursor::new(text);
 
     let map=try!(Map::parse( &mut cur, '\0' ));

@@ -48,19 +48,19 @@ const STATE_LOGIN_OR_REGISTER_ATTEMPTS_LIMIT: usize = 3;
 
 const STATE_INITIALIZING_UDP_CONNECTION_TIMEOUT: usize = 5;
 
-const MESSAGE_LIMIT_NOT_LOGINED: usize = 16*1024;//256;
-const MESSAGE_LIMIT_LOGINED: usize = 16*1024;
+const MESSAGE_LIMIT_NOT_PLAYING: usize = 16*1024;//256;
+const MESSAGE_LIMIT_PLAYING: usize = 16*1024;
 
 const MASTERSERVER_ADDRESS:&'static str = "89.110.48.1:1941";
 
 #[derive(PartialEq, Eq, Clone)]
-enum TCPConnectionState{
+pub enum TCPConnectionStage{
     Disconnecting( DisconnectionReason ),
     WaitingSessionID(i64),
     LoadingPlayerDataFromMasterServer(i64),
     LoginOrRegister(i64, usize),
-    InitializingUDPConnection(i64, usize),
-    Logined,
+    UDPConnectionInitialization(i64, usize, String),
+    Playing,
 }
 
 enum ReadingState{
@@ -74,7 +74,6 @@ pub struct TCPConnection{
     pub shouldReset: bool,
     pub isActive:bool,
     pub shouldReregister:bool,
-    playerID:Option<u16>,
 
     socket: TcpStream,
 
@@ -87,12 +86,12 @@ pub struct TCPConnection{
     writeBuffer:Option<Vec<u8>>,
     needsToWrite:usize,
 
-    state:TCPConnectionState,
+    pub stage:TCPConnectionStage,
 }
 
 pub enum ReadResult{
     NotReady,
-    Ready( Option<u16>, Arc<Mutex<Vec<u8>>> ),
+    Ready( Option<usize>, Arc<Mutex<Vec<u8>>> ),
     Error( &'static str ),
     FatalError( &'static str ),
 }
@@ -105,7 +104,6 @@ impl TCPConnection{
             shouldReset: false,
             isActive:true,
             shouldReregister:false,
-            playerID:None,
 
             socket: socket,
 
@@ -118,7 +116,7 @@ impl TCPConnection{
             writeBuffer:None,
             needsToWrite:0,
 
-            state:TCPConnectionState::WaitingSessionID( get_time().sec+STATE_WAITING_SESSIONID_TIMEOUT as i64 ),
+            stage:TCPConnectionStage::WaitingSessionID( get_time().sec+STATE_WAITING_SESSIONID_TIMEOUT as i64 ),
         }
     }
 
@@ -136,14 +134,14 @@ impl TCPConnection{
                         if needsToRead==0 {
                             let messageLength = BigEndian::read_u32(buffer.as_ref()) as usize;
 
-                            match self.state {
-                                TCPConnectionState::Logined => {
-                                    if messageLength>MESSAGE_LIMIT_LOGINED {
+                            match self.stage {
+                                TCPConnectionStage::Playing => {
+                                    if messageLength>MESSAGE_LIMIT_PLAYING {
                                         return ReadResult::Error("Message length is too large");
                                     }
                                 },
                                 _=>{
-                                    if messageLength>MESSAGE_LIMIT_NOT_LOGINED {
+                                    if messageLength>MESSAGE_LIMIT_NOT_PLAYING {
                                         return ReadResult::Error("Message length is too large");
                                     }
                                 },
@@ -184,11 +182,16 @@ impl TCPConnection{
 
                         needsToRead-=n;
 
-                        if needsToRead==0 {
+                        if needsToRead==0 {//а вызовется, если нужно прочеть 0?
                             self.readingState=ReadingState::ReadingLength([0;4]);
                             self.needsToRead=4;
 
-                            ReadResult::Ready( self.playerID, self.buffer.clone() )
+                            let playerID=match self.stage{
+                                TCPConnectionStage::Playing => Some( usize::from(self.token) ),
+                                _=>None,
+                            };
+
+                            ReadResult::Ready( playerID, self.buffer.clone() )
                         }else{
                             self.needsToRead=needsToRead;
 
@@ -209,28 +212,6 @@ impl TCPConnection{
     }
 
     pub fn writeMessages(&mut self) -> Result<(), &'static str> {
-        /*
-        while self.sendQueue.len()>0 {
-            let message=self.sendQueue.pop_back().unwrap();
-
-            let length=message.len();
-            match self.socket.write(&message[..]) {
-                Ok(n) => {},
-                Err(e) => {
-                    if e.kind() == ErrorKind::WouldBlock {
-                        self.sendQueue.push_back(message);
-
-                        break;
-                    } else {
-                        return Err("write message error")
-                    }
-                }
-            }
-        }
-
-        Ok(())
-        */
-
         loop{
             match self.writeBuffer{
                 Some(ref buffer) => {
@@ -334,29 +315,29 @@ impl TCPConnection{
             return ;
         }
 
-        match self.state {
-            TCPConnectionState::WaitingSessionID( timeout ) => {
+        match self.stage {
+            TCPConnectionStage::WaitingSessionID( timeout ) => {
                 if get_time().sec>=timeout {
-                    self.disconnect( DisconnectionSource::TCP, DisconnectionReason::ServerDesire( String::from("Expectation Session ID timeout")) );
+                    self.disconnect( DisconnectionReason::ServerError( String::from("Expectation Session ID timeout")) );
                 }
             },
-            TCPConnectionState::LoadingPlayerDataFromMasterServer( timeout ) => {
+            TCPConnectionStage::LoadingPlayerDataFromMasterServer( timeout ) => {
                 if get_time().sec>=timeout {//не удалось подключиться к главному серверу - предложим зарегаться или залогиниться
-                    self.state=TCPConnectionState::LoginOrRegister( get_time().sec + STATE_LOGIN_OR_REGISTER_TIMEOUT as i64, 0 );
+                    self.stage=TCPConnectionStage::LoginOrRegister( get_time().sec + STATE_LOGIN_OR_REGISTER_TIMEOUT as i64, 0 );
                     self.sendMessage( ServerToClientTCPPacket::LoginOrRegister.pack() );
                 }
             },
-            TCPConnectionState::LoginOrRegister( timeout, attemptsNumber ) => {
+            TCPConnectionStage::LoginOrRegister( timeout, attemptsNumber ) => {
                 if get_time().sec>=timeout {
-                    self.disconnect( DisconnectionSource::TCP, DisconnectionReason::ServerDesire( String::from("Expectation Login timeout")) );
+                    self.disconnect( DisconnectionReason::ServerError( String::from("Expectation Login timeout")) );
                 }
             },
-            TCPConnectionState::InitializingUDPConnection( timeout, _ ) => {
+            TCPConnectionStage::UDPConnectionInitialization( timeout, _ , _ ) => {
                 if get_time().sec>=timeout {
-                    self.disconnect( DisconnectionSource::TCP, DisconnectionReason::ServerDesire( String::from("Expectation UDP Connection timeout")) );
+                    self.disconnect( DisconnectionReason::ServerError( String::from("Initialization UDP Connection timeout")) );
                 }
             }
-            TCPConnectionState::Logined => {},
+            TCPConnectionStage::Playing => {},
             _=>{},
         }
 
@@ -378,7 +359,7 @@ impl TCPConnection{
 
     */
 
-    pub fn disconnect(&mut self, source:DisconnectionSource, reason:DisconnectionReason){
+    pub fn _disconnect(&mut self, reason:DisconnectionReason){
         println!("disconnect!");
 
         match reason{
@@ -387,12 +368,12 @@ impl TCPConnection{
             DisconnectionReason::ServerShutdown =>
                 self.sendAbschiedMessage( ServerToClientTCPPacket::ServerShutdown.pack() ),
             DisconnectionReason::FatalError( msg ) => {
-                match source{
-                    DisconnectionSource::TCP =>
-                        self.shouldReset=true,
-                    DisconnectionSource::UDP | DisconnectionSource::Player=>
-                        self.sendAbschiedMessage( ServerToClientTCPPacket::ServerError( String::from(msg) ).pack() ),
-                }
+                //match source{
+                //    DisconnectionSource::TCP =>
+                        self.shouldReset=true;
+                //    DisconnectionSource::UDP | DisconnectionSource::Player=>
+                //        self.sendAbschiedMessage( ServerToClientTCPPacket::ServerError( String::from(msg) ).pack() ),
+                //}
             },
             DisconnectionReason::ClientDesire( ref msg ) =>
                 self.shouldReset=true,
@@ -423,20 +404,21 @@ impl TCPConnection{
             }
         );
 
-        match source{
-            DisconnectionSource::TCP => {
-                match self.playerID {
-                    Some( playerID ) =>
-                        self.server.getPlayerAnd(playerID, | player | player.disconnect(source.clone(), reason.clone()) ),
-                    None => {},
-                }
-            },
-            DisconnectionSource::UDP | DisconnectionSource::Player=> {},
+        self.stage=TCPConnectionStage::Disconnecting( reason.clone() );
+        self.isActive=false;
+    }
+
+    pub fn disconnect(&mut self, reason:DisconnectionReason){
+        if !self.isActive {
+            return ;
         }
 
-        self.state=TCPConnectionState::Disconnecting( reason.clone() );
-        self.isActive=false;
-        self.playerID=None;
+        self._disconnect(reason.clone());
+
+        let sessionID:usize=usize::from(self.token);
+
+        self.server.tryDisconnectUDPConnection( sessionID, reason.clone() );
+        self.server.tryDisconnectPlayer( sessionID, reason );
     }
 
     pub fn deregister(&mut self, poll: &mut Poll) {
@@ -448,13 +430,13 @@ impl TCPConnection{
     pub fn processPacket(&mut self, packet:&ClientToServerTCPPacket) -> Result<(), String> {
         match *packet{
             ClientToServerTCPPacket::SessionID( ref sessionID ) => {
-                match self.state {
-                    TCPConnectionState::WaitingSessionID(_) => {},
+                match self.stage {
+                    TCPConnectionStage::WaitingSessionID(_) => {},
                     _ => return Err( String::from("unexpected ClientToServerTCPPacket::Session") ),
                 }
 
                 if sessionID.len()>0 { //точнее = 256 байт в base64
-                    self.state=TCPConnectionState::LoadingPlayerDataFromMasterServer( get_time().sec + STATE_LOADING_PLAYER_DATA_FROM_MASTER_SERVER_TIMEOUT as i64 );
+                    self.stage=TCPConnectionStage::LoadingPlayerDataFromMasterServer( get_time().sec + STATE_LOADING_PLAYER_DATA_FROM_MASTER_SERVER_TIMEOUT as i64 );
 
                     let appData=self.server.appData.upgrade().unwrap();
 
@@ -473,8 +455,8 @@ impl TCPConnection{
 
                                 if response.starts_with("Error:") {
                                     let server=appData.getServerAnd(move | server | {
-                                        server.getSafeTCPConnectionAnd(token, |connection| {
-                                            connection.disconnect( DisconnectionSource::TCP, DisconnectionReason::ServerError(
+                                        server.getSafeTCPConnectionAnd(token, | connection | {
+                                            connection.disconnect(DisconnectionReason::ServerError(
                                                 String::from("invalid SessionID, try to connect to server from server list again")
                                             ));
                                         });
@@ -484,7 +466,7 @@ impl TCPConnection{
                                         server.getSafeTCPConnectionAnd(token, |connection| {
                                             match connection.initializeUDPConnection(&*response) {
                                                 Ok ( _ ) => {},
-                                                Err( e ) => connection.disconnect( DisconnectionSource::TCP, DisconnectionReason::ServerError(e)),
+                                                Err( e ) => connection.disconnect( DisconnectionReason::ServerError(e)),
                                             }
                                         });
                                     });
@@ -493,7 +475,7 @@ impl TCPConnection{
                                 println!("code: {}",responseCode);
                                 let server=appData.getServerAnd(move | server | {
                                     server.getSafeTCPConnectionAnd(token, |connection| {
-                                        connection.state=TCPConnectionState::LoginOrRegister( get_time().sec + STATE_LOGIN_OR_REGISTER_TIMEOUT as i64, 0 );
+                                        connection.stage=TCPConnectionStage::LoginOrRegister( get_time().sec + STATE_LOGIN_OR_REGISTER_TIMEOUT as i64, 0 );
                                         connection.sendMessage( ServerToClientTCPPacket::LoginOrRegister.pack() );
                                     });
                                 });
@@ -504,7 +486,7 @@ impl TCPConnection{
                     return Err( String::from("no sessionID") );
 
                     //Позволить юзеру зарегаться, если он не указал sessionID - сейчас запрещено
-                    //self.state=TCPConnectionState::LoginOrRegister( get_time().sec + STATE_LOGIN_OR_REGISTER_TIMEOUT, 0 );
+                    //self.stage=TCPConnectionStage::LoginOrRegister( get_time().sec + STATE_LOGIN_OR_REGISTER_TIMEOUT, 0 );
                     //self.sendMessage( ServerToClientTCPPacket::LoginOrRegister.pack() );
                 }
             },
@@ -517,16 +499,19 @@ impl TCPConnection{
     fn initializeUDPConnection(&mut self, response:&str ) -> Result<(), String> {
         use description;
 
-        let userID=try!(
+        let (userID, userName)=try!(
             description::parse( response, |root| {
-                root.getStringAs::<usize>("userID")
+                Ok((
+                    try!(root.getStringAs::<usize>("userID")),
+                    try!(root.getString("userName")).clone(),
+                ))
             })
         );
 
-        self.state=TCPConnectionState::InitializingUDPConnection( get_time().sec + STATE_INITIALIZING_UDP_CONNECTION_TIMEOUT as i64, userID );
+        self.stage=TCPConnectionStage::UDPConnectionInitialization( get_time().sec + STATE_INITIALIZING_UDP_CONNECTION_TIMEOUT as i64, userID, userName );
 
-        let token:usize=usize::from(self.token);
-        self.sendMessage( ServerToClientTCPPacket::InitializeUDPConnection(token).pack() );
+        let sessionID:usize=usize::from(self.token);
+        self.sendMessage( ServerToClientTCPPacket::InitializeUDPConnection(sessionID).pack() );
 
         Ok(())
     }

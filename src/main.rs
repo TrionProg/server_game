@@ -71,6 +71,7 @@ extern crate time;
 extern crate byteorder;
 extern crate rustc_serialize;
 extern crate bincode;
+extern crate rand;
 
 use std::env;
 use std::thread;
@@ -91,6 +92,8 @@ mod storage;
 mod server;
 mod tcpServer;
 mod tcpConnection;
+mod udpServer;
+mod udpConnection;
 mod player;
 mod packet;
 mod httpRequester;

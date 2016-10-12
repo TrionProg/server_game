@@ -14,26 +14,45 @@ use std::net::SocketAddr;
 
 use server::{Server,DisconnectionReason,DisconnectionSource};
 
+use packet::{ClientToServerTCPPacket, ClientToServerUDPPacket, ServerToClientTCPPacket, ServerToClientUDPPacket};
+
 pub struct Player{
-    //name:String,
+    isActive:bool,
     server:Arc<Server>,
 
-    tcpConnection:RwLock< Option< Token > >,
-    //udpConnection:RwLock< Option< u16 > >,
+    playerID:usize,
+    userID:usize,
+    userName:String,
 }
 
 
 impl Player{
-    pub fn new(server:Arc<Server>, tcpConnectionToken:Token) -> Player {
+    pub fn new(server:Arc<Server>, playerID:usize, userID:usize, userName:String) -> Player {
         Player{
-            //name:
+            isActive:true,
             server:server,
-            tcpConnection:RwLock::new(Some(tcpConnectionToken)),
-            //udpConnection:RwLock::new(Some(udpConnectionIndex)),
+
+            playerID:playerID,
+            userID:userID,
+            userName:userName,
         }
     }
 
-    pub fn disconnect(&self, source:DisconnectionSource, reason:DisconnectionReason){
+    pub fn _disconnect(&mut self, reason:DisconnectionReason){
+        self.isActive=false;
+    }
+
+    pub fn disconnect(&mut self, reason:DisconnectionReason){
+        self._disconnect(reason.clone());
+
+        self.server.tryDisconnectTCPConnection( self.playerID, reason.clone() );
+        self.server.tryDisconnectUDPConnection( self.playerID, reason.clone() );
+    }
+
+
+
+        //self.server.disconnectPlayersList.lock().push((self.playerID, DisconnectionSource::Player, reason));
+        /*
         match reason{
             DisconnectionReason::Hup =>
                 println!("hup"),
@@ -51,23 +70,13 @@ impl Player{
                 println!("server error {}",msg ),
         }
 
-        let mut tcpConnectionGuard=self.tcpConnection.write().unwrap();
-        //let mut udpConnectionGuard=self.udpConnection.write().unwrap();
-
         match source{
             DisconnectionSource::TCP => {
-                /*
-                match *udpConnectionGuard {
-                    Some( token ) => self.server.getUDPConnectionAnd(token, | connection | connection.disconnect( source.clone(), reason.clone() )),
-                    None => {},
-                }
-                */
+                //только try_lock
+                server.getUDPConnectionAnd(playerID, | connection | connection.disconnect( source.clone(), reason.clone() )),
             },
             DisconnectionSource::UDP => {
-                match *tcpConnectionGuard {
-                    Some( token ) => self.server.getTCPConnectionAnd(token, | connection | connection.disconnect( source.clone(), reason.clone() )),
-                    None => {},
-                }
+                server.getTCPConnectionAnd(Token(token), | connection | connection.disconnect( source.clone(), reason.clone() )),
             },
             DisconnectionSource::Player => {
                 /*
@@ -77,14 +86,28 @@ impl Player{
                 }
                 */
 
-                match *tcpConnectionGuard {
-                    Some( token ) => self.server.getTCPConnectionAnd(token, | connection | connection.disconnect( source.clone(), reason.clone() )),
-                    None => {},
-                }
+                server.getTCPConnectionAnd(Token(token), | connection | connection.disconnect( source.clone(), reason.clone() )),
             },
         }
 
-        *tcpConnectionGuard=None;
-        //*udpConnectionGuard=None;
+        let mut playersGuard=server.players.write().unwrap();
+        */
+
+    pub fn sendDatagram(playerID:usize, datagram:&Vec<u8>){
+        //не паникует, если не находит udpConnection
+    }
+
+    pub fn sendMessage(playerID:usize, message:Vec<u8>){
+        //не паникует, если не находит tcpConnection
+    }
+
+    pub fn processMessage(&mut self, packet:&ClientToServerTCPPacket) -> Result<(), String> {
+        println!("process TCP packet");
+
+        Ok(())
+    }
+
+    pub fn processDatagram(&mut self, packet:&ClientToServerUDPPacket, time:u64) {
+        println!("process UDP packet {}", time);
     }
 }

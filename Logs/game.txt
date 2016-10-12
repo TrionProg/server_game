@@ -7,8 +7,11 @@
 [INFO] Starting TCP and UDP servers
 [INFO] TCP server is ready
 [INFO] Server has been started
-[INFO] Disconnecting : server desire : Expectation UDP Connection timeout
-[INFO] Stoping the server
+[INFO] UDP server is ready
+[ERROR] Disconnecting : server error : Initialization UDP Connection timeout
+[INFO] Server shutdown
+[INFO] UDP server has been stoped
+[INFO] Stoping TCP server
 [INFO] TCP server has been stoped
 [INFO] Destroying HTTP Requester
 [INFO] HTTP Requester has been destroyed
